@@ -1,0 +1,287 @@
+#cloud-config
+# ============================================================================
+# CLOUD-INIT K3S AGENT (Worker Node)
+# ============================================================================
+# Esta VM NAO tem IP público. Acesso à internet via VM NAT.
+# Acesso administrativo via SSH hop: Tailscale → NAT → Agent
+# ============================================================================
+
+hostname: ${hostname}
+fqdn: ${hostname}.k3s.internal
+manage_etc_hosts: true
+
+# Packages instalados primeiro (rápido), update/upgrade no final
+packages:
+  - curl
+  - jq
+  - ca-certificates
+  - gnupg
+  - ufw
+  - net-tools
+
+write_files:
+  # Configurações de kernel para K3s
+  - path: /etc/sysctl.d/99-k3s.conf
+    permissions: '0644'
+    content: |
+      net.ipv4.ip_forward = 1
+      net.ipv6.conf.all.forwarding = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+
+  # Módulos de kernel necessários
+  - path: /etc/modules-load.d/k3s.conf
+    permissions: '0644'
+    content: |
+      br_netfilter
+      overlay
+
+
+
+  # Variáveis de ambiente para scripts (valores injetados pelo Terraform)
+  - path: /etc/k3s/bootstrap.env
+    permissions: '0600'
+    content: |
+      BOOTSTRAP_HOSTNAME="${hostname}"
+      K3S_TOKEN="${k3s_token}"
+
+  # Script principal de bootstrap
+  - path: /root/bootstrap-k3s-agent.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      # Carregar variáveis
+      source /etc/k3s/bootstrap.env
+      
+      LOG_FILE="/var/log/bootstrap.log"
+      MARKER_FILE="/etc/k3s/.bootstrapped"
+      FAIL_MARKER="/var/lib/provision_failed"
+      
+      K3S_SERVER_HOST="k3s-server-1.private.k3sprod.oraclevcn.com"
+      K3S_SERVER_FALLBACK="k3s-server-1"
+      
+      SERVER_TIMEOUT=900
+      K3S_TIMEOUT=600
+      POLL_INTERVAL=15
+      
+      log() {
+        local ts
+        ts=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$ts] $*" | tee -a "$LOG_FILE"
+      }
+      
+      log_section() {
+        echo "" | tee -a "$LOG_FILE"
+        echo "========================================================================" | tee -a "$LOG_FILE"
+        log "$1"
+        echo "========================================================================" | tee -a "$LOG_FILE"
+      }
+      
+      fail() {
+        log "ERRO: $*"
+        echo "$*" > "$FAIL_MARKER"
+        exit 1
+      }
+      
+      wait_for_apt() {
+        log "Aguardando apt do cloud-init finalizar..."
+        local max_wait=300
+        local elapsed=0
+        while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+              fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+              fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+          if [ $elapsed -ge $max_wait ]; then
+            log "AVISO: apt ainda bloqueado após $${max_wait}s, continuando..."
+            break
+          fi
+          sleep 5
+          elapsed=$((elapsed + 5))
+          if [ $((elapsed % 30)) -eq 0 ]; then
+            log "Aguardando apt... ($${elapsed}/$${max_wait}s)"
+          fi
+        done
+        log "apt disponível!"
+      }
+      
+      mkdir -p /etc/k3s
+      
+      log_section "INICIANDO BOOTSTRAP DO K3S AGENT"
+      log "Hostname: $$BOOTSTRAP_HOSTNAME"
+      log "Data: $$(date)"
+      
+      # Aguardar cloud-init terminar instalaçao de pacotes
+      wait_for_apt
+      
+      # ======================================================================
+      # PASSO 1: Carregar módulos de kernel
+      # ======================================================================
+      log_section "PASSO 1: Carregando módulos de kernel"
+      modprobe br_netfilter || log "AVISO: br_netfilter já carregado"
+      modprobe overlay || log "AVISO: overlay já carregado"
+      sysctl --system >> "$LOG_FILE" 2>&1
+      log "Módulos de kernel configurados"
+      
+      # ======================================================================
+      # PASSO 2: Verificar conectividade com internet (via NAT)
+      # ======================================================================
+      log_section "PASSO 2: Verificando conectividade com internet"
+      
+      ELAPSED=0
+      while [ $ELAPSED -lt 900 ]; do
+        if curl -fsSL --connect-timeout 5 https://get.k3s.io > /dev/null 2>&1; then
+          log "Conectividade com internet OK (via VM NAT)"
+          break
+        fi
+        log "Aguardando conectividade... ($ELAPSED/900s)"
+        sleep 10
+        ELAPSED=$((ELAPSED + 10))
+      done
+      
+      if [ $ELAPSED -ge 900 ]; then
+        fail "Sem conectividade com internet após 900s"
+      fi
+      
+      # ======================================================================
+      # PASSO 3: Descobrir IP do servidor K3s
+      # ======================================================================
+      log_section "PASSO 3: Descobrindo servidor K3s"
+      
+      K3S_SERVER_IP=""
+      
+      log "Tentando resolver $K3S_SERVER_HOST..."
+      K3S_SERVER_IP=$(getent hosts "$K3S_SERVER_HOST" 2>/dev/null | awk '{print $1}' || echo "")
+      
+      if [ -z "$K3S_SERVER_IP" ]; then
+        log "DNS falhou, tentando $K3S_SERVER_FALLBACK..."
+        K3S_SERVER_IP=$(getent hosts "$K3S_SERVER_FALLBACK" 2>/dev/null | awk '{print $1}' || echo "")
+      fi
+      
+      if [ -z "$K3S_SERVER_IP" ]; then
+        fail "Nao foi possível resolver IP do servidor K3s"
+      fi
+      
+      log "Servidor K3s encontrado: $K3S_SERVER_IP"
+      
+      # ======================================================================
+      # PASSO 4: Aguardar servidor K3s estar pronto
+      # ======================================================================
+      log_section "PASSO 4: Aguardando servidor K3s"
+      
+      ELAPSED=0
+      SERVER_READY=false
+      
+      while [ $ELAPSED -lt $SERVER_TIMEOUT ]; do
+        # Verifica se port 6443 está aberta (k3s api server)
+        # curl -k https://... pode retornar 401 Unauthorized, mas isso significa que o server está UP
+        status_code=$(curl -k -o /dev/null -w "%%{http_code}" --connect-timeout 5 https://"$K3S_SERVER_IP":6443 || echo "000")
+        
+        if [ "$status_code" != "000" ]; then
+          log "Servidor K3s respondendo na porta 6443 (HTTP $status_code)"
+          SERVER_READY=true
+          break
+        fi
+        
+        log "Aguardando servidor K3s ($K3S_SERVER_IP:6443)... ($ELAPSED/$${SERVER_TIMEOUT}s)"
+        sleep $POLL_INTERVAL
+        ELAPSED=$((ELAPSED + POLL_INTERVAL))
+      done
+      
+      if [ "$SERVER_READY" = false ]; then
+        fail "Servidor K3s nao disponível após $${SERVER_TIMEOUT}s"
+      fi
+      
+      # ======================================================================
+      # PASSO 5: Obter IP privado da VM
+      # ======================================================================
+      log_section "PASSO 5: Obtendo IP privado"
+      
+      PRIVATE_IP=$(hostname -I | awk '{print $1}')
+      log "IP privado: $PRIVATE_IP"
+      
+      # ======================================================================
+      # PASSO 6: Configurar UFW
+      # ======================================================================
+      log_section "PASSO 6: Configurando UFW"
+      
+      ufw --force reset >> "$LOG_FILE" 2>&1 || true
+      
+      ufw default deny incoming >> "$LOG_FILE" 2>&1
+      ufw default allow outgoing >> "$LOG_FILE" 2>&1
+
+      ufw allow in on lo >> "$LOG_FILE" 2>&1
+      
+      ufw allow 41641/udp comment 'Tailscale UDP' >> "$LOG_FILE" 2>&1
+      
+      ufw allow from 100.64.0.0/10 comment 'Tailscale CGNAT range' >> "$LOG_FILE" 2>&1
+      ufw allow to 100.64.0.0/10 comment 'Tailscale CGNAT range' >> "$LOG_FILE" 2>&1
+      
+      ufw allow from 10.42.0.0/16 comment 'K3s Pods' >> "$LOG_FILE" 2>&1
+      ufw allow from 10.43.0.0/16 comment 'K3s Services' >> "$LOG_FILE" 2>&1
+      
+      ufw allow 8472/udp comment 'Flannel VXLAN' >> "$LOG_FILE" 2>&1
+      
+      ufw allow 10250/tcp comment 'Kubelet' >> "$LOG_FILE" 2>&1
+      
+      ufw allow 30080/tcp comment 'Ingress HTTP NodePort' >> "$LOG_FILE" 2>&1
+      ufw allow 30443/tcp comment 'Ingress HTTPS NodePort' >> "$LOG_FILE" 2>&1
+      
+      ufw allow from 10.0.0.0/16 comment 'VCN Internal' >> "$LOG_FILE" 2>&1
+      
+      ufw --force enable >> "$LOG_FILE" 2>&1
+      log "UFW configurado e habilitado"
+      
+      # ======================================================================
+      # PASSO 7: Instalar K3s Agent
+      # ======================================================================
+      log_section "PASSO 7: Instalando K3s Agent"
+      
+      log "Conectando ao servidor: https://$K3S_SERVER_IP:6443"
+      
+      curl -sfL https://get.k3s.io | K3S_URL="https://$K3S_SERVER_IP:6443" K3S_TOKEN="$K3S_TOKEN" sh -s - agent \
+        --node-ip="$PRIVATE_IP" \
+        --node-label workload=apps \
+        >> "$LOG_FILE" 2>&1
+      
+      log "K3s Agent instalado, aguardando registro..."
+      
+      sleep 30
+      
+      if systemctl is-active --quiet k3s-agent; then
+        log "K3s Agent está rodando!"
+      else
+        log "AVISO: K3s Agent pode nao estar rodando ainda"
+      fi
+      
+      # ======================================================================
+      # PASSO 8: Finalizaçao
+      # ======================================================================
+      log_section "PASSO 8: Finalizando"
+      
+      cat > "$MARKER_FILE" <<MARKER_EOF
+      bootstrap_completed=$(date -Iseconds)
+      hostname=$BOOTSTRAP_HOSTNAME
+      private_ip=$PRIVATE_IP
+      k3s_server=$K3S_SERVER_IP
+      k3s_version=$(k3s --version | head -1)
+      MARKER_EOF
+      
+      log "Bootstrap concluído com sucesso!"
+      log "============================================"
+      log "K3s Agent pronto!"
+      log "IP Privado: $PRIVATE_IP"
+      log "Servidor: $K3S_SERVER_IP"
+      log "============================================"
+
+runcmd:
+  - /root/bootstrap-k3s-agent.sh
+  # Update/upgrade DEPOIS de configurar tudo (nao bloqueia o bootstrap)
+  - apt-get update -y
+  - DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+
+power_state:
+  mode: reboot
+  message: "Reiniciando após bootstrap do K3s Agent"
+  timeout: 300
+  condition: true

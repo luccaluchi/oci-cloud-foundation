@@ -1,0 +1,303 @@
+#cloud-config
+# ============================================================================
+# CLOUD-INIT: VM NAT Gateway
+# ============================================================================
+# Esta VM é o gateway NAT para todas as VMs K3s privadas.
+# - IP público para acesso à internet
+# - Tailscale para administraçao remota
+# - iptables MASQUERADE para NAT das VMs privadas
+# - UFW para firewall
+# ============================================================================
+
+hostname: ${hostname}
+fqdn: ${hostname}.k3s.internal
+manage_etc_hosts: true
+
+# Packages instalados primeiro (sao rápidos e necessários)
+packages:
+  - curl
+  - wget
+  - iptables
+  - net-tools
+  - htop
+  - jq
+  - ufw
+
+write_files:
+  # Variáveis de ambiente para scripts (valores injetados pelo Terraform)
+  - path: /etc/nat/bootstrap.env
+    permissions: '0600'
+    content: |
+      TAILSCALE_AUTH_KEY="${tailscale_auth_key}"
+      BOOTSTRAP_HOSTNAME="${hostname}"
+      PRIVATE_SUBNET="${private_subnet}"
+
+  # Script de configuraçao do NAT
+  - path: /usr/local/bin/setup-nat.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      echo "=== Configurando NAT Gateway ==="
+      
+      # Habilitar IP forwarding
+      echo "Habilitando IP forwarding..."
+      cat > /etc/sysctl.d/99-nat.conf <<SYSCTL_EOF
+      net.ipv4.ip_forward = 1
+      net.ipv4.conf.all.forwarding = 1
+      net.ipv6.conf.all.forwarding = 1
+      SYSCTL_EOF
+      sysctl -p /etc/sysctl.d/99-nat.conf
+      
+      # Garantir que o NAT funcione mesmo sem UFW (fallback)
+      PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -1)
+      echo "Aplicando regras básicas de iptables na interface $PRIMARY_IF"
+      iptables -t nat -A POSTROUTING -o "$PRIMARY_IF" -j MASQUERADE
+      iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+      iptables -A FORWARD -i "$PRIMARY_IF" -o "$PRIMARY_IF" -j ACCEPT
+      # Remover a regra de REJECT padrao se existir
+      iptables -D FORWARD -j REJECT --reject-with icmp-host-prohibited 2>/dev/null || true
+      
+      echo "=== Configuraçao base de NAT (sysctl + iptables) ok ==="
+
+  # Script de instalaçao do Tailscale
+  - path: /usr/local/bin/setup-tailscale.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      # Carregar variáveis
+      source /etc/nat/bootstrap.env
+      
+      # Aguardar cloud-init terminar instalaçao de pacotes
+      echo "Aguardando apt do cloud-init finalizar..."
+      max_wait=300
+      elapsed=0
+      while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+            fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+            fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+        if [ $elapsed -ge $max_wait ]; then
+          echo "AVISO: apt ainda bloqueado após $${max_wait}s, continuando..."
+          break
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+        if [ $((elapsed % 30)) -eq 0 ]; then
+          echo "Aguardando apt... ($${elapsed}/$${max_wait}s)"
+        fi
+      done
+      echo "apt disponível!"
+      
+      echo "=== Instalando Tailscale ==="
+      
+      # Instalar Tailscale
+      curl -fsSL https://tailscale.com/install.sh | sh
+      
+      # Habilitar e iniciar serviço
+      systemctl enable tailscaled
+      systemctl start tailscaled
+      
+      # Aguardar serviço estar pronto
+      sleep 5
+      
+      # Conectar ao Tailscale com as opções corretas para NAT gateway
+      echo "Conectando ao Tailscale..."
+      tailscale up \
+        --authkey="$TAILSCALE_AUTH_KEY" \
+        --hostname="$BOOTSTRAP_HOSTNAME" \
+        --advertise-exit-node \
+        --advertise-routes="$PRIVATE_SUBNET" \
+        --accept-routes \
+        --ssh
+      
+      # Aguardar conexao
+      for i in $(seq 1 60); do
+        if tailscale status 2>/dev/null | grep -q "^100\."; then
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "Tailscale conectado! IP: $TAILSCALE_IP"
+          break
+        fi
+        echo "Aguardando conexao Tailscale... ($i/60)"
+        sleep 5
+      done
+      
+      echo "=== Tailscale configurado ==="
+
+  # Script de configuraçao do UFW
+  - path: /usr/local/bin/setup-ufw.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      # Carregar variáveis
+      source /etc/nat/bootstrap.env
+      
+      echo "=== Configurando UFW ==="
+      
+      # Detectar interface de rede primária
+      PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -1)
+      echo "Interface primária detectada: $PRIMARY_IF"
+      
+      # Detectar interface da subnet privada (segunda interface ou mesma)
+      # grep pode falhar se nao houver rota específica, usar || true
+      PRIVATE_IF=$(ip route | grep "$PRIVATE_SUBNET" | awk '{print $3}' | head -1 || true)
+      if [ -z "$PRIVATE_IF" ]; then
+        # Se nao encontrar rota direta, usar a interface que nao é a primária
+        PRIVATE_IF=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo\|tailscale" | grep -v "$PRIMARY_IF" | head -1)
+      fi
+      if [ -z "$PRIVATE_IF" ]; then
+        PRIVATE_IF="$PRIMARY_IF"
+      fi
+      echo "Interface privada detectada: $PRIVATE_IF"
+      
+      # IMPORTANTE: Limpar regras iptables REJECT que bloqueiam forwarding
+      # Estas regras sao inseridas pelo sistema e bloqueiam antes do UFW
+      echo "Limpando regras REJECT do iptables que bloqueiam forwarding..."
+      while iptables -L FORWARD -n --line-numbers 2>/dev/null | grep -q "REJECT"; do
+        RULE_NUM=$(iptables -L FORWARD -n --line-numbers | grep "REJECT" | head -1 | awk '{print $1}')
+        if [ -n "$RULE_NUM" ]; then
+          echo "Removendo regra REJECT #$RULE_NUM da chain FORWARD"
+          iptables -D FORWARD "$RULE_NUM"
+        else
+          break
+        fi
+      done
+      
+      # Limpar também do ip6tables
+      while ip6tables -L FORWARD -n --line-numbers 2>/dev/null | grep -q "REJECT"; do
+        RULE_NUM=$(ip6tables -L FORWARD -n --line-numbers | grep "REJECT" | head -1 | awk '{print $1}')
+        if [ -n "$RULE_NUM" ]; then
+          echo "Removendo regra REJECT IPv6 #$RULE_NUM da chain FORWARD"
+          ip6tables -D FORWARD "$RULE_NUM"
+        else
+          break
+        fi
+      done
+      
+      # Reset UFW
+      ufw --force reset
+      
+      # Políticas padrao
+      ufw default deny incoming
+      ufw default allow outgoing
+      
+      # SSH
+      ufw allow 22/tcp comment 'SSH'
+      
+      # Tailscale
+      ufw allow 41641/udp comment 'Tailscale UDP'
+      ufw allow from 100.64.0.0/10 comment 'Tailscale CGNAT range'
+      ufw allow to 100.64.0.0/10 comment 'Tailscale CGNAT range'
+      
+      # Permitir tráfego da subnet privada (para NAT)
+      ufw allow from "$PRIVATE_SUBNET" comment 'Private subnet for NAT'
+      
+      # Permitir forwarding no UFW
+      sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+      sed -i 's/#net\/ipv4\/ip_forward=1/net\/ipv4\/ip_forward=1/g' /etc/ufw/sysctl.conf
+      
+      # Regras de roteamento explícitas para forwarding
+      ufw route allow in on "$PRIVATE_IF" out on "$PRIMARY_IF" from "$PRIVATE_SUBNET" comment 'NAT outbound'
+      ufw route allow in on "$PRIMARY_IF" out on "$PRIVATE_IF" to "$PRIVATE_SUBNET" comment 'NAT inbound'
+      
+      # Backup do before.rules
+      cp /etc/ufw/before.rules /etc/ufw/before.rules.backup
+      
+      # Criar regras NAT usando echo para evitar problemas com YAML
+      # O asterisco em *nat é interpretado como âncora YAML se usado em heredoc
+      {
+        echo "# NAT Table rules (added by setup-ufw.sh)"
+        echo "*nat"
+        echo ":POSTROUTING ACCEPT [0:0]"
+        echo "-A POSTROUTING -s $PRIVATE_SUBNET -o $PRIMARY_IF -j MASQUERADE"
+        echo "COMMIT"
+        echo ""
+      } > /tmp/nat-rules.txt
+      
+      # Inserir no início do before.rules (antes de *filter)
+      if ! grep -q '^\*nat' /etc/ufw/before.rules; then
+        # Inserir as regras NAT antes da seçao *filter
+        sed -i '/^\*filter/e cat /tmp/nat-rules.txt' /etc/ufw/before.rules
+        echo "Regras NAT adicionadas ao before.rules"
+      else
+        echo "Regras NAT já existem no before.rules"
+      fi
+      
+      rm -f /tmp/nat-rules.txt
+      
+      # Se Tailscale já conectado, permitir interface
+      if ip link show tailscale0 &> /dev/null; then
+        ufw allow in on tailscale0 comment 'Tailscale interface'
+        echo "Interface tailscale0 já existe, regra adicionada"
+      fi
+      
+      # Habilitar UFW
+      ufw --force enable
+      
+      # Verificar e remover novamente regras REJECT após UFW (por segurança)
+      sleep 2
+      while iptables -L FORWARD -n --line-numbers 2>/dev/null | grep -q "REJECT.*icmp-host-prohibited"; do
+        RULE_NUM=$(iptables -L FORWARD -n --line-numbers | grep "REJECT.*icmp-host-prohibited" | head -1 | awk '{print $1}')
+        if [ -n "$RULE_NUM" ]; then
+          echo "Removendo regra REJECT residual #$RULE_NUM"
+          iptables -D FORWARD "$RULE_NUM"
+        else
+          break
+        fi
+      done
+      
+      echo "=== UFW configurado com sucesso ==="
+
+  # Script para adicionar interface tailscale0 no UFW
+  - path: /usr/local/bin/setup-ufw-tailscale-interface.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      echo "=== Aguardando interface tailscale0 ==="
+      
+      for i in $(seq 1 60); do
+        if ip link show tailscale0 &> /dev/null; then
+          echo "Interface tailscale0 detectada!"
+          ufw allow in on tailscale0 comment 'Tailscale interface'
+          echo "Regra UFW para tailscale0 adicionada"
+          break
+        fi
+        echo "Aguardando interface tailscale0... ($i/60)"
+        sleep 5
+      done
+      
+      echo "=== Configuraçao UFW Tailscale concluída ==="
+
+  # Marker file'
+  - path: /usr/local/bin/finalize-setup.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      echo "=== Finalizando configuraçao ==="
+      
+      mkdir -p /var/lib/cloud/instance
+      
+      cat > /var/lib/cloud/instance/nat-ready <<READY_EOF
+      NAT Gateway pronto: $(date)
+      Tailscale IP: $(tailscale ip -4 2>/dev/null || echo 'nao conectado')
+      READY_EOF
+      
+      echo "=== VM NAT Gateway pronta! ==="
+
+runcmd:
+  - mkdir -p /etc/nat
+  - /usr/local/bin/setup-nat.sh
+  - /usr/local/bin/setup-tailscale.sh
+  - /usr/local/bin/setup-ufw.sh
+  - /usr/local/bin/setup-ufw-tailscale-interface.sh
+  - /usr/local/bin/finalize-setup.sh
+  # Update/upgrade DEPOIS de configurar tudo (nao bloqueia as VMs K3s)
+  - apt-get update -y
+  - DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"

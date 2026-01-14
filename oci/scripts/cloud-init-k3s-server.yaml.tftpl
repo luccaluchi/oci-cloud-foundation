@@ -1,0 +1,411 @@
+#cloud-config
+# ============================================================================
+# CLOUD-INIT K3S SERVER (Control Plane)
+# ============================================================================
+# Esta VM NAO tem IP público. Acesso à internet via VM NAT.
+# Acesso administrativo via SSH e kubectl via Tailscale
+# ============================================================================
+
+hostname: ${hostname}
+fqdn: ${hostname}.k3s.internal
+manage_etc_hosts: true
+
+# Packages instalados primeiro (rápido), update/upgrade no final
+packages:
+  - curl
+  - jq
+  - ca-certificates
+  - gnupg
+  - ufw
+  - net-tools
+
+write_files:
+  # Configurações de kernel para K3s
+  - path: /etc/sysctl.d/99-k3s.conf
+    permissions: '0644'
+    content: |
+      net.ipv4.ip_forward = 1
+      net.ipv6.conf.all.forwarding = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+
+  # Módulos de kernel necessários
+  - path: /etc/modules-load.d/k3s.conf
+    permissions: '0644'
+    content: |
+      br_netfilter
+      overlay
+
+  # Variáveis de ambiente para scripts (valores injetados pelo Terraform)
+  - path: /etc/k3s/bootstrap.env
+    permissions: '0600'
+    content: |
+      TAILSCALE_AUTH_KEY="${tailscale_auth_key}"
+      BOOTSTRAP_HOSTNAME="${hostname}"
+      K3S_TOKEN="${k3s_token}"
+
+  # Script de instalaçao do Tailscale
+  - path: /usr/local/bin/setup-tailscale.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      # Carregar variáveis
+      source /etc/k3s/bootstrap.env
+      
+      LOG_FILE="/var/log/bootstrap.log"
+      
+      log() {
+        local ts
+        ts=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$ts] $*" | tee -a "$LOG_FILE"
+      }
+      
+      wait_for_apt() {
+        log "Aguardando apt do cloud-init finalizar..."
+        local max_wait=300
+        local elapsed=0
+        while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+              fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+              fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+          if [ $elapsed -ge $max_wait ]; then
+            log "AVISO: apt ainda bloqueado após $${max_wait}s, continuando..."
+            break
+          fi
+          sleep 5
+          elapsed=$((elapsed + 5))
+          if [ $((elapsed % 30)) -eq 0 ]; then
+            log "Aguardando apt... ($${elapsed}/$${max_wait}s)"
+          fi
+        done
+        log "apt disponível!"
+      }
+      
+      # Aguardar cloud-init terminar instalaçao de pacotes
+      wait_for_apt
+      
+      log "=== Instalando Tailscale ==="
+      
+      if [ -z "$TAILSCALE_AUTH_KEY" ]; then
+        log "ERRO: TAILSCALE_AUTH_KEY está vazia!"
+        exit 1
+      fi
+      
+      log "Chave de auth recebida (primeiros 20 caracteres): $(echo "$TAILSCALE_AUTH_KEY" | cut -c1-20)..."
+      
+      log "Baixando instalador do Tailscale..."
+      
+      MAX_RETRIES=5
+      RETRY=0
+      INSTALLED=false
+      
+      while [ $RETRY -lt $MAX_RETRIES ]; do
+        # Usamos tee para ver o erro no log do cloud-init (serial console) e no arquivo
+        if curl -fsSL https://tailscale.com/install.sh | sh 2>&1 | tee -a "$LOG_FILE"; then
+          INSTALLED=true
+          break
+        fi
+        log "AVISO: Falha ao instalar Tailscale (tentativa $((RETRY+1))/$MAX_RETRIES). Retentando em 10s..."
+        sleep 10
+        RETRY=$((RETRY+1))
+      done
+      
+      if [ "$INSTALLED" = false ]; then
+        log "ERRO: Falha crítica ao instalar Tailscale após $MAX_RETRIES tentativas"
+      fi
+      
+      if ! command -v tailscale &> /dev/null; then
+        log "ERRO: Comando tailscale nao encontrado após instalaçao"
+        exit 1
+      fi
+      
+      log "Tailscale instalado: $(tailscale version 2>&1 | head -1)"
+      
+      log "Habilitando serviço tailscaled..."
+      systemctl enable tailscaled >> "$LOG_FILE" 2>&1
+      systemctl start tailscaled >> "$LOG_FILE" 2>&1
+      
+      log "Aguardando daemon tailscaled..."
+      sleep 5
+      
+      if ! systemctl is-active --quiet tailscaled; then
+        log "ERRO: Daemon tailscaled nao está ativo"
+        systemctl status tailscaled >> "$LOG_FILE" 2>&1 || true
+        exit 1
+      fi
+      
+      log "Conectando ao Tailscale..."
+      if ! tailscale up \
+        --authkey="$TAILSCALE_AUTH_KEY" \
+        --hostname="$BOOTSTRAP_HOSTNAME" \
+        --accept-routes \
+        --ssh >> "$LOG_FILE" 2>&1; then
+        log "ERRO: Falha ao conectar ao Tailscale"
+        exit 1
+      fi
+      
+      log "Aguardando IP do Tailscale..."
+      CONNECTED=false
+      for i in $(seq 1 60); do
+        if tailscale status 2>/dev/null | grep -q "^100\."; then
+          TAILSCALE_IP=$(tailscale ip -4 2>/dev/null)
+          log "Tailscale conectado! IP: $TAILSCALE_IP"
+          CONNECTED=true
+          break
+        fi
+        log "Aguardando conexao Tailscale... ($i/60)"
+        sleep 5
+      done
+      
+      if [ "$CONNECTED" = false ]; then
+        log "AVISO: Tailscale nao obteve IP após 5 minutos"
+        tailscale status >> "$LOG_FILE" 2>&1 || true
+      else
+        log "Permitindo interface tailscale0 no UFW..."
+        ufw allow in on tailscale0 comment 'Tailscale interface' >> "$LOG_FILE" 2>&1 || log "AVISO: Falha ao adicionar regra tailscale0"
+      fi
+      
+      log "=== Tailscale configurado ==="
+
+  # Script principal de bootstrap
+  - path: /root/bootstrap-k3s-server.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      # Carregar variáveis
+      source /etc/k3s/bootstrap.env
+      
+      LOG_FILE="/var/log/bootstrap.log"
+      MARKER_FILE="/etc/k3s/.bootstrapped"
+      FAIL_MARKER="/var/lib/provision_failed"
+      K3S_TIMEOUT=600
+      POLL_INTERVAL=10
+      
+      log() {
+        local ts
+        ts=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$ts] $*" | tee -a "$LOG_FILE"
+      }
+      
+      log_section() {
+        echo "" | tee -a "$LOG_FILE"
+        echo "========================================================================" | tee -a "$LOG_FILE"
+        log "$1"
+        echo "========================================================================" | tee -a "$LOG_FILE"
+      }
+      
+      fail() {
+        log "ERRO: $*"
+        echo "$*" > "$FAIL_MARKER"
+        exit 1
+      }
+      
+      wait_for_apt() {
+        log "Aguardando apt do cloud-init finalizar..."
+        local max_wait=300
+        local elapsed=0
+        while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+              fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+              fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+          if [ $elapsed -ge $max_wait ]; then
+            log "AVISO: apt ainda bloqueado após $${max_wait}s, continuando..."
+            break
+          fi
+          sleep 5
+          elapsed=$((elapsed + 5))
+          if [ $((elapsed % 30)) -eq 0 ]; then
+            log "Aguardando apt... ($${elapsed}/$${max_wait}s)"
+          fi
+        done
+        log "apt disponível!"
+      }
+      
+      mkdir -p /etc/k3s
+      
+      log_section "INICIANDO BOOTSTRAP DO K3S SERVER"
+      log "Hostname: $BOOTSTRAP_HOSTNAME"
+      log "Data: $(date)"
+      
+      # Aguardar cloud-init terminar instalaçao de pacotes
+      wait_for_apt
+      
+      # ======================================================================
+      # PASSO 1: Carregar módulos de kernel
+      # ======================================================================
+      log_section "PASSO 1: Carregando módulos de kernel"
+      modprobe br_netfilter || log "AVISO: br_netfilter já carregado"
+      modprobe overlay || log "AVISO: overlay já carregado"
+      sysctl --system >> "$LOG_FILE" 2>&1
+      log "Módulos de kernel configurados"
+      
+      # ======================================================================
+      # PASSO 2: Verificar conectividade com internet (via NAT)
+      # ======================================================================
+      log_section "PASSO 2: Verificando conectividade com internet"
+      
+      ELAPSED=0
+      while [ $ELAPSED -lt 900 ]; do
+        if curl -fsSL --connect-timeout 5 https://get.k3s.io > /dev/null 2>&1; then
+          log "Conectividade com internet OK (via VM NAT)"
+          break
+        fi
+        log "Aguardando conectividade... ($ELAPSED/900s)"
+        sleep 10
+        ELAPSED=$((ELAPSED + 10))
+      done
+      
+      if [ $ELAPSED -ge 900 ]; then
+        fail "Sem conectividade com internet após 900s"
+      fi
+      
+      # ======================================================================
+      # PASSO 3: Instalar e configurar Tailscale (ANTES do UFW!)
+      # ======================================================================
+      log_section "PASSO 3: Instalando Tailscale"
+      
+      if [ -x /usr/local/bin/setup-tailscale.sh ]; then
+        /usr/local/bin/setup-tailscale.sh || log "AVISO: Falha ao configurar Tailscale, continuando..."
+      else
+        log "AVISO: Script setup-tailscale.sh nao encontrado"
+      fi
+      
+      # ======================================================================
+      # PASSO 4: Configurar UFW (APÓS Tailscale para nao bloquear conexao)
+      # ======================================================================
+      log_section "PASSO 4: Configurando UFW"
+      
+      ufw --force reset >> "$LOG_FILE" 2>&1 || true
+      
+      ufw default deny incoming >> "$LOG_FILE" 2>&1
+      ufw default allow outgoing >> "$LOG_FILE" 2>&1
+      
+      ufw allow in on lo >> "$LOG_FILE" 2>&1
+
+      ufw allow 41641/udp comment 'Tailscale UDP' >> "$LOG_FILE" 2>&1
+      
+      ufw allow from 100.64.0.0/10 comment 'Tailscale CGNAT range' >> "$LOG_FILE" 2>&1
+      ufw allow to 100.64.0.0/10 comment 'Tailscale CGNAT range' >> "$LOG_FILE" 2>&1
+      
+      if ip link show tailscale0 &> /dev/null; then
+        ufw allow in on tailscale0 comment 'Tailscale interface' >> "$LOG_FILE" 2>&1
+        log "Interface tailscale0 adicionada ao UFW"
+      fi
+      
+      ufw allow 6443/tcp comment 'K3s API Server' >> "$LOG_FILE" 2>&1
+      
+      ufw allow from 10.42.0.0/16 comment 'K3s Pods' >> "$LOG_FILE" 2>&1
+      ufw allow from 10.43.0.0/16 comment 'K3s Services' >> "$LOG_FILE" 2>&1
+      
+      ufw allow 8472/udp comment 'Flannel VXLAN' >> "$LOG_FILE" 2>&1
+      
+      ufw allow 10250/tcp comment 'Kubelet' >> "$LOG_FILE" 2>&1
+      
+      ufw allow 30080/tcp comment 'Ingress HTTP NodePort' >> "$LOG_FILE" 2>&1
+      ufw allow 30443/tcp comment 'Ingress HTTPS NodePort' >> "$LOG_FILE" 2>&1
+      
+      ufw allow from 10.0.0.0/16 comment 'VCN Internal' >> "$LOG_FILE" 2>&1
+      
+      ufw --force enable >> "$LOG_FILE" 2>&1
+      log "UFW configurado e habilitado"
+      
+      # ======================================================================
+      # PASSO 5: Obter IP privado da VM
+      # ======================================================================
+      log_section "PASSO 5: Obtendo IP privado"
+      
+      PRIVATE_IP=$(hostname -I | awk '{print $1}')
+      log "IP privado: $PRIVATE_IP"
+      
+      if [ -z "$PRIVATE_IP" ]; then
+        fail "Nao foi possível obter IP privado"
+      fi
+      
+      # ======================================================================
+      # PASSO 6: Instalar K3s Server
+      # ======================================================================
+      log_section "PASSO 6: Instalando K3s Server"
+      
+      log "Baixando e instalando k3s..."
+      
+      TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "")
+      
+      TLS_SANS="--tls-san=$BOOTSTRAP_HOSTNAME --tls-san=$PRIVATE_IP"
+      if [ -n "$TAILSCALE_IP" ]; then      TLS_SANS="--tls-san=$BOOTSTRAP_HOSTNAME --tls-san=$PRIVATE_IP"
+      if [ -n "$TAILSCALE_IP" ]; then
+        TLS_SANS="$TLS_SANS --tls-san=$TAILSCALE_IP"
+      fi
+      
+      curl -sfL https://get.k3s.io | K3S_TOKEN="$K3S_TOKEN" sh -s - server \
+        --node-ip="$PRIVATE_IP" \
+        --disable=traefik \
+        --disable=servicelb \
+        --node-label workload=infra \
+        $TLS_SANS \
+        >> "$LOG_FILE" 2>&1
+        TLS_SANS="$TLS_SANS --tls-san=$TAILSCALE_IP"
+      fi
+      
+      curl -sfL https://get.k3s.io | K3S_TOKEN="$K3S_TOKEN" sh -s - server \
+        --node-ip="$PRIVATE_IP" \
+        --disable=traefik \
+        --disable=servicelb \
+        --node-label workload=infra \
+        $TLS_SANS \
+        >> "$LOG_FILE" 2>&1
+      
+      log "K3s instalado, aguardando serviço..."
+      
+      ELAPSED=0
+      while [ $ELAPSED -lt $K3S_TIMEOUT ]; do
+        if kubectl get nodes 2>/dev/null | grep -q " Ready"; then
+          log "K3s está pronto!"
+          break
+        fi
+        log "Aguardando K3s... ($ELAPSED/$${K3S_TIMEOUT}s)"
+        sleep $POLL_INTERVAL
+        ELAPSED=$((ELAPSED + POLL_INTERVAL))
+      done
+      
+      if ! kubectl get nodes 2>/dev/null | grep -q " Ready"; then
+        # Tenta pegar logs antes de falhar para ajudar no debug
+        journalctl -u k3s --no-pager | tail -n 50 >> "$LOG_FILE"
+        fail "K3s nao ficou pronto após $${K3S_TIMEOUT}s"
+      fi
+      
+      log "Aplicando rótulo de Worker..."
+      kubectl label nodes "$BOOTSTRAP_HOSTNAME" node-role.kubernetes.io/worker=worker --overwrite >> "$LOG_FILE" 2>&1 || log "AVISO: Falha ao rotular como worker"
+
+      log "K3s Token (para workers):"
+      cat /var/lib/rancher/k3s/server/node-token >> "$LOG_FILE"
+      TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "N/A")
+      cat > "$MARKER_FILE" <<MARKER_EOF
+      bootstrap_completed=$(date -Iseconds)
+      hostname=$BOOTSTRAP_HOSTNAME
+      private_ip=$PRIVATE_IP
+      tailscale_ip=$TAILSCALE_IP
+      k3s_version=$(k3s --version | head -1)
+      MARKER_EOF
+      
+      log "Bootstrap concluído com sucesso!"
+      log "============================================"
+      log "K3s Server pronto!"
+      log "IP Privado: $PRIVATE_IP"
+      log "IP Tailscale: $TAILSCALE_IP"
+      log "Acesso SSH: ssh root@$BOOTSTRAP_HOSTNAME (via Tailscale)"
+      log "Acesso kubectl: Configure KUBECONFIG com IP Tailscale"
+      log "============================================"
+
+runcmd:
+  - /root/bootstrap-k3s-server.sh
+  # Update/upgrade DEPOIS de configurar tudo (nao bloqueia o bootstrap)
+  - apt-get update -y
+  - DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+
+power_state:
+  mode: reboot
+  message: "Reiniciando após bootstrap do K3s Server"
+  timeout: 300
+  condition: true

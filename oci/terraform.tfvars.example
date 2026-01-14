@@ -1,0 +1,13 @@
+user_ocid        = "ocid1.user.oc1..omgAlotOfCharacter"
+fingerprint      = "crazy numbers and letters"
+tenancy_ocid     = "ocid1.tenancy.oc1..woooooow"
+region           = "your-region-x"
+private_key_path = "~/.oci/oci_api_key.pem"
+
+ssh_public_key_content = "ssh-ed25519 HeyThere"
+
+tailscale_auth_key     = "tskey-auth-aNiceKeyHere"
+
+# Budget
+budget_amount      = 7
+budget_alert_email = "example@mail.com"
