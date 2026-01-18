@@ -77,55 +77,114 @@
         msg: "Private IP: {{ private_ip }}"
 
     # ========================================================================
-    # 3. Firewall (UFW)
+    # 3. Firewall (UFW - Única Fonte de Verdade)
     # ========================================================================
-    - name: Resetar UFW
+    - name: Desabilitar UFW temporariamente
       community.general.ufw:
-        state: reset
+        state: disabled
+      ignore_errors: true
 
-    - name: Definir políticas padrão
-      community.general.ufw:
-        direction: "{{ item.dir }}"
-        policy: "{{ item.pol }}"
+    - name: Flush completo iptables (filter)
+      command: iptables -F
+      ignore_errors: true
+
+    - name: Flush completo iptables (nat)
+      command: iptables -t nat -F
+      ignore_errors: true
+
+    - name: Flush completo iptables (mangle)
+      command: iptables -t mangle -F
+      ignore_errors: true
+
+    - name: Deletar chains customizadas
+      command: "{{ item }}"
       loop:
-        - { dir: 'incoming', pol: 'deny' }
-        - { dir: 'outgoing', pol: 'allow' }
+        - iptables -X
+        - iptables -t nat -X
+        - iptables -t mangle -X
+      ignore_errors: true
 
-    # Como não temos Tailscale aqui, a comunicação intra-cluster depende puramente
-    # da rede privada (VCN) 10.0.0.0/16.
-    - name: Liberar Comunicação Interna da VCN (Server <-> Agents)
+    - name: Configurar políticas padrão como ACCEPT
+      shell: |
+        iptables -P INPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+        iptables -P OUTPUT ACCEPT
+      ignore_errors: true
+
+    - name: Remover pacotes conflitantes
+      apt:
+        name:
+          - netfilter-persistent
+          - iptables-persistent
+        state: absent
+        purge: yes
+      ignore_errors: true
+
+    - name: Reset completo UFW
+      command: ufw --force reset
+      changed_when: true
+
+    - name: Configurar UFW defaults
+      lineinfile:
+        path: /etc/default/ufw
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^DEFAULT_INPUT_POLICY=', line: 'DEFAULT_INPUT_POLICY="DROP"' }
+        - { regexp: '^DEFAULT_OUTPUT_POLICY=', line: 'DEFAULT_OUTPUT_POLICY="ACCEPT"' }
+        - { regexp: '^DEFAULT_FORWARD_POLICY=', line: 'DEFAULT_FORWARD_POLICY="ACCEPT"' }
+        - { regexp: '^IPV6=', line: 'IPV6=yes' }
+
+    - name: Liberar portas essenciais do K3s Agent (apenas VCN)
       community.general.ufw:
         rule: allow
-        src: '10.0.0.0/16'
         port: "{{ item.port }}"
         proto: "{{ item.proto }}"
+        src: '10.0.0.0/16'
         comment: "{{ item.comment }}"
       loop:
-        - { port: 10250, proto: 'tcp', comment: 'Kubelet Metrics' }
-        # Portas CNI (Flannel/WireGuard)
+        # Kubelet
+        - { port: 10250, proto: 'tcp', comment: 'Kubelet (VCN)' }
+        # Flannel CNI
         - { port: 8472, proto: 'udp', comment: 'Flannel VXLAN' }
         - { port: 51820, proto: 'udp', comment: 'Flannel WireGuard' }
         - { port: 51821, proto: 'udp', comment: 'Flannel WireGuard IPv6' }
+        # SSH
+        - { port: 22, proto: 'tcp', comment: 'SSH (VCN)' }
 
-    - name: Liberar NodePorts (Ingress Traffic)
+    - name: Liberar NodePorts da VCN
       community.general.ufw:
         rule: allow
         port: 30000:32767
         proto: tcp
-        comment: 'K8s NodePorts Range'
-    
-    # Permitir SSH apenas da rede interna (vindo do NAT Gateway/Bastion)
-    - name: Liberar SSH apenas da Subnet Privada
+        src: '10.0.0.0/16'
+        comment: 'NodePorts (VCN)'
+
+    - name: Liberar Tailscale
       community.general.ufw:
         rule: allow
-        src: '10.0.0.0/16'
-        port: 22
-        proto: tcp
-        comment: 'SSH Internal (Bastion)'
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        src: "{{ item.src | default('any') }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: 41641, proto: 'udp', comment: 'Tailscale UDP' }
+        - { port: 22, proto: 'tcp', src: '100.64.0.0/10', comment: 'SSH (Tailscale)' }
+
+    - name: Liberar toda rede Tailscale
+      community.general.ufw:
+        rule: allow
+        src: '100.64.0.0/10'
+        comment: 'Tailscale VPN'
 
     - name: Habilitar UFW
       community.general.ufw:
         state: enabled
+
+    - name: Garantir UFW no boot
+      systemd:
+        name: ufw
+        enabled: yes
 
     - name: Debug - UFW configured
       debug:
@@ -203,5 +262,5 @@
         state: restarted
 
     - name: Reload UFW
-      community.general.ufw:
-        state: reloaded
+      command: ufw reload
+      changed_when: true

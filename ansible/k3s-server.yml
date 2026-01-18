@@ -82,66 +82,118 @@
       debug:
         msg: "Private IP: {{ private_ip }}, Tailscale IP: {{ ts_ip.stdout | default('not available') }}"
 
-    # 3. Firewall UFW
-    - name: Resetar UFW (apenas no bootstrap)
+    # 3. Firewall UFW (Única Fonte de Verdade)
+    - name: Desabilitar UFW temporariamente
       community.general.ufw:
-        state: reset
+        state: disabled
+      ignore_errors: true
 
-    - name: Definir políticas padrão (incoming/outgoing/routed)
-      community.general.ufw:
-        direction: "{{ item.dir }}"
-        policy: "{{ item.pol }}"
+    - name: Flush completo iptables (filter)
+      command: iptables -F
+      ignore_errors: true
+
+    - name: Flush completo iptables (nat)
+      command: iptables -t nat -F
+      ignore_errors: true
+
+    - name: Flush completo iptables (mangle)
+      command: iptables -t mangle -F
+      ignore_errors: true
+
+    - name: Deletar chains customizadas
+      command: "{{ item }}"
       loop:
-        - { dir: 'incoming', pol: 'deny' }
-        - { dir: 'outgoing', pol: 'allow' }
-        - { dir: 'routed', pol: 'allow' }
+        - iptables -X
+        - iptables -t nat -X
+        - iptables -t mangle -X
+      ignore_errors: true
 
-    - name: Liberar Portas do Control Plane e CNI
+    - name: Configurar políticas padrão como ACCEPT
+      shell: |
+        iptables -P INPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+        iptables -P OUTPUT ACCEPT
+      ignore_errors: true
+
+    - name: Remover pacotes conflitantes
+      apt:
+        name:
+          - netfilter-persistent
+          - iptables-persistent
+        state: absent
+        purge: yes
+      ignore_errors: true
+
+    - name: Reset completo UFW
+      command: ufw --force reset
+      changed_when: true
+
+    - name: Configurar UFW defaults
+      lineinfile:
+        path: /etc/default/ufw
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^DEFAULT_INPUT_POLICY=', line: 'DEFAULT_INPUT_POLICY="DROP"' }
+        - { regexp: '^DEFAULT_OUTPUT_POLICY=', line: 'DEFAULT_OUTPUT_POLICY="ACCEPT"' }
+        - { regexp: '^DEFAULT_FORWARD_POLICY=', line: 'DEFAULT_FORWARD_POLICY="ACCEPT"' }
+        - { regexp: '^IPV6=', line: 'IPV6=yes' }
+
+    - name: Liberar portas essenciais do K3s Server
       community.general.ufw:
         rule: allow
         port: "{{ item.port }}"
         proto: "{{ item.proto }}"
+        src: "{{ item.src | default('any') }}"
         comment: "{{ item.comment }}"
       loop:
-        - { port: 6443, proto: 'tcp', comment: 'K3s API Server' }
-        - { port: 10250, proto: 'tcp', comment: 'Kubelet Metrics' }
-        - { port: 41641, proto: 'udp', comment: 'Tailscale Direct UDP' }
-        - { port: 8472, proto: 'udp', comment: 'Flannel VXLAN (fallback)' }
-        - { port: 51820, proto: 'udp', comment: 'Flannel WireGuard IPv4' }
-        - { port: 51821, proto: 'udp', comment: 'Flannel WireGuard IPv6' }
+        # API Server - apenas VCN e Tailscale
+        - { port: 6443, proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'K3s API (VCN)' }
+        - { port: 6443, proto: 'tcp', src: '100.64.0.0/10', comment: 'K3s API (Tailscale)' }
+        # Kubelet - apenas VCN
+        - { port: 10250, proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'Kubelet (VCN)' }
+        # ETCD - apenas VCN
+        - { port: '2379:2380', proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'ETCD (VCN)' }
+        # Flannel CNI
+        - { port: 8472, proto: 'udp', src: '{{ vcn_cidr }}', comment: 'Flannel VXLAN' }
+        - { port: 51820, proto: 'udp', src: '{{ vcn_cidr }}', comment: 'Flannel WireGuard' }
+        - { port: 51821, proto: 'udp', src: '{{ vcn_cidr }}', comment: 'Flannel WireGuard IPv6' }
+        # Tailscale
+        - { port: 41641, proto: 'udp', comment: 'Tailscale UDP' }
 
-    - name: Liberar NodePorts (Ingress Traffic)
+    - name: Liberar NodePorts da VCN
       community.general.ufw:
         rule: allow
         port: 30000:32767
         proto: tcp
-        comment: 'K8s NodePorts Range'
+        src: '{{ vcn_cidr }}'
+        comment: 'NodePorts (VCN)'
 
-    - name: Liberar ETCD interno apenas para VCN
-      community.general.ufw:
-        rule: allow
-        src: "{{ vcn_cidr }}"
-        port: "2379:2380"
-        proto: tcp
-        comment: "ETCD internal (VCN only)"
-
-    - name: Liberar Rede Tailscale (VPN)
+    - name: Liberar toda rede Tailscale
       community.general.ufw:
         rule: allow
         src: '100.64.0.0/10'
-        comment: 'Tailscale VPN Network'
+        comment: 'Tailscale VPN'
 
-    - name: Liberar interface tailscale0
+    - name: SSH apenas de Tailscale e subnet privada
       community.general.ufw:
         rule: allow
-        interface: tailscale0
-        direction: in
-        comment: "Allow all on tailscale0"
+        port: 22
+        proto: tcp
+        src: "{{ item }}"
+        comment: "SSH {{ item }}"
+      loop:
+        - '100.64.0.0/10'
+        - '10.0.10.0/24'
 
     - name: Habilitar UFW
       community.general.ufw:
         state: enabled
-      notify: Reload UFW
+
+    - name: Garantir UFW no boot
+      systemd:
+        name: ufw
+        enabled: yes
 
     - name: Debug - UFW configured
       debug:
@@ -229,5 +281,5 @@
         state: restarted
 
     - name: Reload UFW
-      community.general.ufw:
-        state: reloaded
+      command: ufw reload
+      changed_when: true
