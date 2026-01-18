@@ -11,12 +11,15 @@
     state: started
 
 - name: Autenticar Tailscale
-  command: >
-    tailscale up 
-    --authkey={{ tailscale_auth_key }} 
-    --hostname={{ bootstrap_hostname }} 
-    {{ tailscale_args | default('') }}
+  shell: |
+    tailscale up \
+      --authkey="$TS_AUTHKEY" \
+      --hostname={{ bootstrap_hostname }} \
+      {{ tailscale_args | default('') }}
+  environment:
+    TS_AUTHKEY: "{{ tailscale_auth_key }}"
   register: ts_up
+  no_log: true
   changed_when: "'Success' in ts_up.stdout"
   failed_when: 
     - ts_up.rc != 0

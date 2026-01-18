@@ -46,3 +46,9 @@ runcmd:
   - ansible-galaxy collection install community.general ansible.posix
 
   - ansible-pull -U ${github_repo_url} -C ${git_branch} -d /opt/infra-setup ansible/nat-gateway.yml 2>&1 | tee /var/log/ansible-pull.log
+
+  # Segurança: Remover credenciais sensíveis após bootstrap
+  - sleep 5
+  - shred -u /root/.ssh/github_deploy_key || true
+  - sed -i '/tailscale_auth_key:/d' /etc/ansible/host_vars/localhost.yml || true
+  - logger "CLOUD-INIT: Credenciais sensíveis removidas após bootstrap"
