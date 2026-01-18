@@ -14,6 +14,15 @@
       debug:
         msg: "Starting NAT Gateway configuration on {{ ansible_hostname }}"
 
+    - name: Detect active network interface
+      set_fact:
+        public_interface: "{{ ansible_default_ipv4.interface }}"
+      when: public_interface is not defined
+
+    - name: Debug - Network Interface
+      debug:
+        msg: "Using public interface: {{ public_interface }} for NAT"
+
     # ========================================================================
     # 1. Configuração de Kernel (Rede e Persistência)
     # ========================================================================
@@ -113,14 +122,6 @@
     # ========================================================================
     # 4. Configuração do UFW e NAT (A parte crítica)
     # ========================================================================
-    - name: Identificar interface pública (Internet)
-      set_fact:
-        public_interface: "{{ ansible_default_ipv4.interface }}"
-
-    - name: Debug - Network interface identified
-      debug:
-        msg: "Public interface: {{ public_interface }}, Private subnet: {{ private_subnet }}"
-
     - name: Resetar UFW (Garantir estado limpo)
       community.general.ufw:
         state: reset

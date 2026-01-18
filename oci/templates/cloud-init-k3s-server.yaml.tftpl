@@ -3,14 +3,6 @@ hostname: ${hostname}
 fqdn: ${hostname}.k3s.internal
 manage_etc_hosts: true
 
-packages:
-  - curl
-  - git
-  - ansible
-  - software-properties-common
-  - rsyslog
-  - ufw
-
 write_files:
   - path: /etc/rsyslog.d/99-central.conf
     owner: root:root
@@ -61,6 +53,15 @@ write_files:
         StrictHostKeyChecking accept-new
 
 runcmd:
+  - |
+    echo "Waiting for Internet connectivity..."
+    until curl -s --connect-timeout 5 https://google.com > /dev/null; do
+      echo "Waiting for internet..."
+      sleep 5
+    done
+    echo "Internet connectivity established."
+  - apt-get update
+  - apt-get install -y curl git ansible software-properties-common rsyslog ufw
   - logger -t cloud-init "Starting rsyslog restart"
   - systemctl restart rsyslog
   - logger -t cloud-init "K3s Server bootstrap started on ${hostname}"
