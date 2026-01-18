@@ -8,6 +8,7 @@ packages:
   - ansible
   - software-properties-common
   - rsyslog
+  - ufw
 
 write_files:
   # 1. Configuração do Rsyslog (IMEDIATA)
@@ -69,7 +70,4 @@ runcmd:
   - ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
 
   # 3. Executar Ansible Pull
-  - ansible-pull -U ${github_repo_url} \
-    -C ${git_branch} \
-    -d /opt/infra-setup \
-    ansible/k3s-agent.yml 2>&1 | tee /var/log/ansible-pull.log | logger -t ansible-pull
+  - ansible-pull -U ${github_repo_url} -C ${git_branch} -d /opt/infra-setup ansible/k3s-agent.yml 2>&1 | tee /var/log/ansible-pull.log | logger -t ansible-pull
