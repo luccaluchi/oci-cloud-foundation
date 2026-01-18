@@ -14,19 +14,32 @@
       debug:
         msg: "Starting NAT Gateway configuration on {{ ansible_hostname }}"
 
-    - name: Detect active network interface
+    # ========================================================================
+    # 1. Interface Detection & Facts
+    # ========================================================================
+    - name: Detect active public interface
+      shell: ip route get 8.8.8.8 | grep -oP 'dev \K\S+' | head -n1
+      register: detected_public_interface
+      changed_when: false
+      
+    - name: Set public_interface fact
       set_fact:
-        public_interface: "{{ ansible_default_ipv4.interface }}"
+        public_interface: "{{ detected_public_interface.stdout }}"
       when: public_interface is not defined
+
+    - name: Assert public interface is valid
+      assert:
+        that: public_interface is defined and public_interface | length > 0
+        fail_msg: "ERROR: Could not detect public interface for NAT."
 
     - name: Debug - Network Interface
       debug:
         msg: "Using public interface: {{ public_interface }} for NAT"
 
     # ========================================================================
-    # 1. Configuração de Kernel (Rede e Persistência)
+    # 2. Kernel & Sysctl (Modern)
     # ========================================================================
-    - name: Carregar módulos de kernel (Runtime)
+    - name: Carregar módulos de kernel
       community.general.modprobe:
         name: "{{ item }}"
         state: present
@@ -34,10 +47,6 @@
         - br_netfilter
         - overlay
         - nf_nat
-
-    - name: Debug - Kernel modules loaded
-      debug:
-        msg: "Kernel modules loaded successfully"
 
     - name: Persistir módulos no boot (/etc/modules-load.d/nat.conf)
       copy:
@@ -49,100 +58,71 @@
         owner: root
         mode: '0644'
 
-    - name: Configurar sysctls essenciais (Forwarding e Bridge)
+    - name: Configurar Sysctl para NAT e UFW
+      # Utilizamos o módulo sysctl focando no arquivo do UFW para evitar conflitos
+      # e garantir que o UFW carregue estas configs ao iniciar
       ansible.posix.sysctl:
         name: "{{ item.name }}"
         value: "{{ item.value }}"
         state: present
+        sysctl_file: /etc/ufw/sysctl.conf
         reload: yes
       loop:
         - { name: 'net.ipv4.ip_forward', value: '1' }
         - { name: 'net.ipv4.conf.all.forwarding', value: '1' }
-        - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
+        - { name: 'net.ipv6.conf.all.forwarding', value: '0' }
         - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
-        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
-
-    - name: Debug - Sysctls configured
-      debug:
-        msg: "NAT and forwarding sysctls configured successfully"
 
     # ========================================================================
-    # 2. Configuração do Tailscale (Router Mode)
+    # 3. Tailscale
     # ========================================================================
     - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
         tailscale_args: "--ssh --advertise-tags=tag:nat-gateway"
 
-    - name: Debug - Tailscale configured
-      debug:
-        msg: "Tailscale configured with exit node and route advertisement for {{ private_subnet }}"
-
     # ========================================================================
-    # 3. Configuração de Central de Logs (Rsyslog + lnav)
+    # 4. Logs (Rsyslog)
     # ========================================================================
-    - name: Habilitar recepção de logs (TCP/UDP 514) no rsyslog.conf
+    - name: Configurar recepção de logs (TCP/UDP 514)
       lineinfile:
         path: /etc/rsyslog.conf
         regexp: "{{ item.regexp }}"
         line: "{{ item.line }}"
-        state: present
       loop:
-        - { regexp: '^#module\(load="imudp"\)', line: 'module(load="imudp")' }
-        - { regexp: '^#input\(type="imudp"',    line: 'input(type="imudp" port="514")' }
-        - { regexp: '^#module\(load="imtcp"\)', line: 'module(load="imtcp")' }
-        - { regexp: '^#input\(type="imtcp"',    line: 'input(type="imtcp" port="514")' }
+        - { regexp: '^#?module\(load="imudp"\)', line: 'module(load="imudp")' }
+        - { regexp: '^#?input\(type="imudp"',    line: 'input(type="imudp" port="514")' }
+        - { regexp: '^#?module\(load="imtcp"\)', line: 'module(load="imtcp")' }
+        - { regexp: '^#?input\(type="imtcp"',    line: 'input(type="imtcp" port="514")' }
       notify: Restart Rsyslog
 
     - name: Configurar Template de Logs Remotos
       copy:
         dest: /etc/rsyslog.d/01-central-server.conf
         content: |
-          # Organiza logs em: /var/log/remote/<HOSTNAME>/<PROGRAMA>.log
           $template RemoteLogs,"/var/log/remote/%HOSTNAME%/%PROGRAMNAME%.log"
-          
-          # Se o log não vier de localhost, use o template e pare o processamento (não suja o syslog local)
           if ($fromhost-ip != '127.0.0.1') then ?RemoteLogs
           & stop
         owner: root
-        group: root
         mode: '0644'
       notify: Restart Rsyslog
 
-    - name: Instalar lnav (Log File Navigator)
+    - name: Instalar lnav
       apt:
         name: lnav
         state: present
-        update_cache: yes
-
-    - name: Debug - Log server configured
-      debug:
-        msg: "Central log server configured to receive logs on port 514 (TCP/UDP)"
 
     # ========================================================================
-    # 4. Configuração do UFW e NAT (A parte crítica)
+    # 5. UFW & NAT Rules (Optimized)
     # ========================================================================
-    - name: Resetar UFW (Garantir estado limpo)
-      community.general.ufw:
-        state: reset
-
-    - name: Definir políticas padrão do UFW
-      community.general.ufw:
-        direction: "{{ item.dir }}"
-        policy: "{{ item.pol }}"
-      loop:
-        - { dir: 'incoming', pol: 'deny' }
-        - { dir: 'outgoing', pol: 'allow' }
-        - { dir: 'routed', pol: 'allow' } # Essencial para o NAT funcionar
-
-    - name: Ajustar /etc/default/ufw para permitir Forwarding
+    - name: Definir política de Forwarding no UFW
       lineinfile:
         path: /etc/default/ufw
         regexp: '^DEFAULT_FORWARD_POLICY='
         line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
       notify: Reload UFW
 
-    - name: Inserir regras de NAT (Masquerade) no before.rules
+    - name: Inserir regras de NAT (Masquerade)
       blockinfile:
         path: /etc/ufw/before.rules
         insertbefore: '^\*filter'
@@ -154,48 +134,53 @@
           COMMIT
       notify: Reload UFW
 
-    - name: Debug - NAT rules configured
-      debug:
-        msg: "NAT masquerading configured for {{ private_subnet }} via {{ public_interface }}"
-
-    # ========================================================================
-    # 5. Regras de Firewall (Permissões)
-    # ========================================================================
-    - name: Liberar serviços essenciais (Portas)
+    - name: Aplicar regras mínimas de Firewall
       community.general.ufw:
         rule: allow
-        port: "{{ item.port }}"
-        proto: "{{ item.proto }}"
+        port: "{{ item.port | default(omit) }}"
+        proto: "{{ item.proto | default('any') }}"
+        src: "{{ item.src | default('any') }}"
         comment: "{{ item.comment }}"
       loop:
         - { port: 22, proto: 'tcp', comment: 'SSH' }
         - { port: 41641, proto: 'udp', comment: 'Tailscale Direct UDP' }
-        - { port: 514, proto: 'udp', comment: 'Syslog UDP' }
-        - { port: 514, proto: 'tcp', comment: 'Syslog TCP' }
+        - { port: 514, src: "{{ private_subnet }}", comment: 'Syslog UDP (Private)' }
+        - { port: 514, proto: 'tcp', src: "{{ private_subnet }}", comment: 'Syslog TCP (Private)' }
+        - { src: '100.64.0.0/10', comment: 'Tailscale VPN' }
+        - { src: "{{ private_subnet }}", comment: 'Private Subnet' }
 
-    - name: Liberar Redes Confiáveis
-      community.general.ufw:
-        rule: allow
-        src: "{{ item.src }}"
-        comment: "{{ item.comment }}"
-      loop:
-        - { src: '100.64.0.0/10', comment: 'Rede Tailscale (VPN)' }
-        - { src: "{{ private_subnet }}", comment: 'Rede Privada LAN (NAT + Logs)' }
-
-    - name: Liberar interface tailscale0
-      community.general.ufw:
-        rule: allow
-        interface: tailscale0
-        direction: in
-        comment: "Allow all on tailscale0"
-
-    - name: Habilitar UFW
+    - name: Enable UFW (Ensure active)
       community.general.ufw:
         state: enabled
 
-    - name: Debug - Playbook completed
+    # ========================================================================
+    # 6. Verification
+    # ========================================================================
+    - name: Verify IP Forwarding status
+      command: sysctl net.ipv4.ip_forward
+      register: sysctl_check
+      changed_when: false
+      failed_when: "'= 1' not in sysctl_check.stdout"
+
+    - name: Verify NAT POSTROUTING rule
+      # Verifica se a regra existe. Usa '-C' (Check). Retorna 0 se existe.
+      command: iptables -t nat -C POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
+      register: iptables_check
+      changed_when: false
+      failed_when: iptables_check.rc != 0
+      ignore_errors: yes # Warn only
+
+    - name: Check UFW status
+      command: ufw status verbose
+      register: ufw_check
+      changed_when: false
+
+    - name: Debug - Verification Results
       debug:
-        msg: "NAT Gateway configuration completed successfully on {{ ansible_hostname }}"
+        msg:
+          - "Forwarding: {{ sysctl_check.stdout }}"
+          - "NAT Rule Exists: {{ iptables_check.rc == 0 }}"
+          - "UFW Status: {{ ufw_check.stdout_lines[0] }}"
 
   handlers:
     - name: Restart Rsyslog
