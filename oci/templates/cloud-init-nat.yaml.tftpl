@@ -17,7 +17,6 @@ write_files:
     owner: root:root
     content: |
       ---
-      tailscale_auth_key: "${tailscale_auth_key}"
       bootstrap_hostname: "${hostname}"
       private_subnet: "${private_subnet}"
       github_repo_url: "${github_repo_url}"
@@ -72,7 +71,7 @@ runcmd:
   - logger -t cloud-init "Ansible collections installed"
 
   - logger -t cloud-init "Starting ansible-pull for nat-gateway"
-  - ansible-pull -U ${github_repo_url} -C ${git_branch} -d /opt/infra-setup ansible/nat-gateway.yml 2>&1 | tee /var/log/ansible-pull.log
+  - ansible-pull -U ${github_repo_url} -C ${git_branch} -d /opt/infra-setup -e @/etc/ansible/host_vars/localhost.yml ansible/nat-gateway.yml 2>&1 | tee /var/log/ansible-pull.log
   - logger -t cloud-init "ansible-pull completed"
   - logger -t cloud-init "ansible-pull completed"
 
