@@ -54,8 +54,13 @@
         msg: "Kubernetes sysctls configured successfully"
 
     # ========================================================================
-    # 2. Configuração de Rede e Logs (SEM TAILSCALE)
+    # 2. Configuração de Rede e Logs
     # ========================================================================
+    - name: Configurar Tailscale (task include)
+      include_tasks: tasks/install_tailscale.yml
+      vars:
+        tailscale_args: "--ssh --advertise-tags=tag:k3s-agent"
+
     - name: Garantir configuração do Rsyslog Client
       include_tasks: tasks/setup_rsyslog_client.yml
 

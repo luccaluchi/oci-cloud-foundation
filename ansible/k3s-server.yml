@@ -59,7 +59,7 @@
     - name: Configurar Tailscale (task include)
       include_tasks: tasks/install_tailscale.yml
       vars:
-        tailscale_args: "--ssh"
+        tailscale_args: "--ssh --advertise-tags=tag:k3s-server"
 
     - name: Debug - Tailscale configured
       debug:

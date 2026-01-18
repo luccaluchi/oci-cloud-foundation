@@ -63,7 +63,7 @@
     - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
-        tailscale_args: "--ssh"
+        tailscale_args: "--ssh --advertise-tags=tag:nat-gateway"
 
     - name: Debug - Tailscale configured
       debug:

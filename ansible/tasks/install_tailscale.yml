@@ -48,3 +48,8 @@
 - name: Debug - Tailscale authentication completed
   debug:
     msg: "Tailscale connected with hostname {{ bootstrap_hostname }}"
+
+- name: Clean up Tailscale auth key file
+  file:
+    path: /root/.ts_auth_key
+    state: absent
