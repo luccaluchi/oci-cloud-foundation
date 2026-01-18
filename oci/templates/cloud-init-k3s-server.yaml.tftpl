@@ -36,6 +36,8 @@ write_files:
       k3s_token: "${k3s_token}"
       k3s_role: "server"
       central_log_ip: "${central_log_ip}"
+      github_repo_url: "${github_repo_url}"
+      git_branch: "${git_branch}"
 
   # 3. Chave SSH de Deploy (Base64)
   - path: /root/.ssh/github_deploy_key

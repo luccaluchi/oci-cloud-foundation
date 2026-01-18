@@ -38,6 +38,9 @@ write_files:
       # Logs
       central_log_ip: "${central_log_ip}"
 
+      github_repo_url: "${github_repo_url}"
+      git_branch: "${git_branch}"
+
   # 3. Chave SSH de Deploy
   - path: /root/.ssh/github_deploy_key
     permissions: '0600'
