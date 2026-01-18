@@ -71,11 +71,15 @@ resource "oci_core_instance" "nat" {
   }
 
   metadata = {
-    ssh_authorized_keys = var.ssh_public_key_content
-    user_data = base64encode(templatefile("${path.module}/scripts/cloud-init-nat.yaml.tftpl", {
+    ssh_authorized_keys = var.admin_vm_ssh_public_key
+    user_data = base64encode(templatefile("${path.module}/templates/cloud-init-nat.yaml.tftpl", {
       tailscale_auth_key = var.tailscale_auth_key
       hostname           = local.hostnames.nat
       private_subnet     = var.private_subnet_cidr
+      github_deploy_key_b64 = base64encode(var.github_deploy_key)
+      github_repo_url    = var.github_repo_url
+      git_branch         = var.git_branch
+      central_log_ip = data.oci_core_vnic.nat_vnic[0].private_ip_address
     }))
   }
 
@@ -101,14 +105,6 @@ data "oci_core_vnic" "nat_vnic" {
   count = local.selected.amd_nat_enabled ? 1 : 0
 
   vnic_id = data.oci_core_vnic_attachments.nat_vnic_attachments[0].vnic_attachments[0].vnic_id
-}
-
-# Private IP da VM NAT para uso como gateway na route table
-# Usa o IP primário da VNIC da VM NAT
-data "oci_core_private_ips" "nat_private_ip" {
-  count = local.selected.amd_nat_enabled ? 1 : 0
-
-  vnic_id = data.oci_core_vnic.nat_vnic[0].id
 }
 
 # ============================================================================
@@ -144,11 +140,15 @@ resource "oci_core_instance" "k3s_server" {
   }
 
   metadata = {
-    ssh_authorized_keys = var.ssh_public_key_content
-    user_data = base64encode(templatefile("${path.module}/scripts/cloud-init-k3s-server.yaml.tftpl", {
+    ssh_authorized_keys = var.admin_vm_ssh_public_key
+    user_data = base64encode(templatefile("${path.module}/templates/cloud-init-k3s-server.yaml.tftpl", {
       tailscale_auth_key = var.tailscale_auth_key
       hostname           = local.hostnames.server
       k3s_token          = random_password.k3s_token.result
+      github_deploy_key_b64 = base64encode(var.github_deploy_key)
+      github_repo_url    = var.github_repo_url
+      git_branch         = var.git_branch
+      central_log_ip = data.oci_core_vnic.nat_vnic[0].private_ip_address
     }))
   }
 
@@ -163,6 +163,17 @@ resource "oci_core_instance" "k3s_server" {
   }
 
   freeform_tags = local.common_tags
+}
+
+data "oci_core_vnic_attachments" "server_vnic_attachments" {
+  count          = local.selected.arm_server_count
+  compartment_id = oci_identity_compartment.main.id
+  instance_id    = oci_core_instance.k3s_server[count.index].id
+}
+
+data "oci_core_vnic" "server_vnic" {
+  count   = local.selected.arm_server_count
+  vnic_id = data.oci_core_vnic_attachments.server_vnic_attachments[count.index].vnic_attachments[0].vnic_id
 }
 
 # ============================================================================
@@ -198,12 +209,15 @@ resource "oci_core_instance" "k3s_worker_arm" {
   }
 
   metadata = {
-    ssh_authorized_keys = var.ssh_public_key_content
-    user_data = base64encode(templatefile("${path.module}/scripts/cloud-init-k3s-agent.yaml.tftpl", {
+    ssh_authorized_keys = var.admin_vm_ssh_public_key
+    user_data = base64encode(templatefile("${path.module}/templates/cloud-init-k3s-agent.yaml.tftpl", {
       tailscale_auth_key = var.tailscale_auth_key
       hostname           = local.hostnames.worker_arm[count.index]
-      nat_gateway_ip     = data.oci_core_vnic.nat_vnic[0].private_ip_address
       k3s_token          = random_password.k3s_token.result
+      github_deploy_key_b64 = base64encode(var.github_deploy_key)
+      github_repo_url    = var.github_repo_url
+      git_branch         = var.git_branch
+      central_log_ip = data.oci_core_vnic.nat_vnic[0].private_ip_address
     }))
   }
 
@@ -248,12 +262,15 @@ resource "oci_core_instance" "k3s_worker_amd" {
   }
 
   metadata = {
-    ssh_authorized_keys = var.ssh_public_key_content
-    user_data = base64encode(templatefile("${path.module}/scripts/cloud-init-k3s-agent.yaml.tftpl", {
+    ssh_authorized_keys = var.admin_vm_ssh_public_key
+    user_data = base64encode(templatefile("${path.module}/templates/cloud-init-k3s-agent.yaml.tftpl", {
       tailscale_auth_key = var.tailscale_auth_key
       hostname           = local.hostnames.worker_amd[count.index]
-      nat_gateway_ip     = data.oci_core_vnic.nat_vnic[0].private_ip_address
       k3s_token          = random_password.k3s_token.result
+      github_deploy_key_b64 = base64encode(var.github_deploy_key)
+      github_repo_url    = var.github_repo_url
+      git_branch         = var.git_branch
+      central_log_ip = data.oci_core_vnic.nat_vnic[0].private_ip_address
     }))
   }
 

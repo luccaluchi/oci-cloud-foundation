@@ -1,0 +1,23 @@
+---
+- name: Instalar Tailscale (Via Script Oficial)
+  shell: curl -fsSL https://tailscale.com/install.sh | sh
+  args:
+    creates: /usr/bin/tailscale
+
+- name: Garantir que o serviço tailscaled está rodando
+  systemd:
+    name: tailscaled
+    enabled: yes
+    state: started
+
+- name: Autenticar Tailscale
+  command: >
+    tailscale up 
+    --authkey={{ tailscale_auth_key }} 
+    --hostname={{ bootstrap_hostname }} 
+    {{ tailscale_args | default('') }}
+  register: ts_up
+  changed_when: "'Success' in ts_up.stdout"
+  failed_when: 
+    - ts_up.rc != 0
+    - "'already' not in ts_up.stderr"

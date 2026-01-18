@@ -1,0 +1,180 @@
+---
+- name: Configurar NAT Gateway & Log Server
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    # Valor de fallback. O valor real é injetado pelo Cloud-init em /etc/ansible/host_vars/localhost.yml
+    private_subnet: "10.0.0.0/24"
+
+  tasks:
+    # ========================================================================
+    # 1. Configuração de Kernel (Rede e Persistência)
+    # ========================================================================
+    - name: Carregar módulos de kernel (Runtime)
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - br_netfilter
+        - overlay
+        - nf_nat
+
+    - name: Persistir módulos no boot (/etc/modules-load.d/nat.conf)
+      copy:
+        dest: /etc/modules-load.d/nat.conf
+        content: |
+          br_netfilter
+          overlay
+          nf_nat
+        owner: root
+        mode: '0644'
+
+    - name: Configurar sysctls essenciais (Forwarding e Bridge)
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+        - { name: 'net.ipv4.conf.all.forwarding', value: '1' }
+        - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
+        # Evita perda de pacotes se houver tráfego de bridge (Docker/CNI)
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+
+    # ========================================================================
+    # 2. Configuração do Tailscale (Router Mode)
+    # ========================================================================
+    - name: Configurar Tailscale
+      include_tasks: tasks/install_tailscale.yml
+      vars:
+        # --advertise-exit-node: Permite usar essa VM como saída de internet segura
+        # --advertise-routes: Permite acessar a rede K3s (10.0.x.x) via VPN
+        # --accept-routes: Aceita rotas de outros nós
+        tailscale_args: "--advertise-exit-node --advertise-routes={{ private_subnet }} --accept-routes --ssh"
+
+    # ========================================================================
+    # 3. Configuração de Central de Logs (Rsyslog + lnav)
+    # ========================================================================
+    - name: Habilitar recepção de logs (TCP/UDP 514) no rsyslog.conf
+      lineinfile:
+        path: /etc/rsyslog.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^#module\(load="imudp"\)', line: 'module(load="imudp")' }
+        - { regexp: '^#input\(type="imudp"',    line: 'input(type="imudp" port="514")' }
+        - { regexp: '^#module\(load="imtcp"\)', line: 'module(load="imtcp")' }
+        - { regexp: '^#input\(type="imtcp"',    line: 'input(type="imtcp" port="514")' }
+      notify: Restart Rsyslog
+
+    - name: Configurar Template de Logs Remotos
+      copy:
+        dest: /etc/rsyslog.d/01-central-server.conf
+        content: |
+          # Organiza logs em: /var/log/remote/<HOSTNAME>/<PROGRAMA>.log
+          $template RemoteLogs,"/var/log/remote/%HOSTNAME%/%PROGRAMNAME%.log"
+          
+          # Se o log não vier de localhost, use o template e pare o processamento (não suja o syslog local)
+          if ($fromhost-ip != '127.0.0.1') then ?RemoteLogs
+          & stop
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Rsyslog
+
+    - name: Instalar lnav (Log File Navigator)
+      apt:
+        name: lnav
+        state: present
+        update_cache: yes
+
+    # ========================================================================
+    # 4. Configuração do UFW e NAT (A parte crítica)
+    # ========================================================================
+    - name: Identificar interface pública (Internet)
+      set_fact:
+        public_interface: "{{ ansible_default_ipv4.interface }}"
+
+    - name: Resetar UFW (Garantir estado limpo)
+      community.general.ufw:
+        state: reset
+
+    - name: Definir políticas padrão do UFW
+      community.general.ufw:
+        direction: "{{ item.dir }}"
+        policy: "{{ item.pol }}"
+      loop:
+        - { dir: 'incoming', pol: 'deny' }
+        - { dir: 'outgoing', pol: 'allow' }
+        - { dir: 'routed', pol: 'allow' } # Essencial para o NAT funcionar
+
+    - name: Ajustar /etc/default/ufw para permitir Forwarding
+      lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+      notify: Reload UFW
+
+    - name: Inserir regras de NAT (Masquerade) no before.rules
+      blockinfile:
+        path: /etc/ufw/before.rules
+        insertbefore: '^\*filter'
+        marker: "# {mark} ANSIBLE MANAGED NAT RULES"
+        block: |
+          *nat
+          :POSTROUTING ACCEPT [0:0]
+          # Mascarar tráfego da subnet privada ({{ private_subnet }}) saindo pela interface pública ({{ public_interface }})
+          -A POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
+          COMMIT
+      notify: Reload UFW
+
+    # ========================================================================
+    # 5. Regras de Firewall (Permissões)
+    # ========================================================================
+    - name: Liberar serviços essenciais (Portas)
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: 22, proto: 'tcp', comment: 'SSH' }
+        - { port: 41641, proto: 'udp', comment: 'Tailscale Direct UDP' }
+        - { port: 514, proto: 'udp', comment: 'Syslog UDP' }
+        - { port: 514, proto: 'tcp', comment: 'Syslog TCP' }
+
+    - name: Liberar Redes Confiáveis
+      community.general.ufw:
+        rule: allow
+        src: "{{ item.src }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { src: '100.64.0.0/10', comment: 'Rede Tailscale (VPN)' }
+        - { src: "{{ private_subnet }}", comment: 'Rede Privada LAN (NAT + Logs)' }
+
+    - name: Liberar interface tailscale0
+      community.general.ufw:
+        rule: allow
+        interface: tailscale0
+        direction: in
+        comment: "Allow all on tailscale0"
+
+    - name: Habilitar UFW
+      community.general.ufw:
+        state: enabled
+
+  handlers:
+    - name: Restart Rsyslog
+      service:
+        name: rsyslog
+        state: restarted
+
+    - name: Reload UFW
+      community.general.ufw:
+        state: reloaded

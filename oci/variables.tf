@@ -34,7 +34,7 @@ variable "region" {
 # ----------------------------------------------------------------------------
 # SSH
 # ----------------------------------------------------------------------------
-variable "ssh_public_key_content" {
+variable "admin_vm_ssh_public_key" {
   description = "Conteúdo da chave pública SSH (ssh-rsa AAAA...)"
   type        = string
 }
@@ -106,4 +106,25 @@ variable "project_name" {
   description = "Nome do projeto para tags e recursos"
   type        = string
   default     = "k3s-cluster"
+}
+
+# ----------------------------------------------------------------------------
+# GitHub
+# ----------------------------------------------------------------------------
+variable "github_repo_url" {
+  description = "URL SSH do repositório GitHub para ansible-pull"
+  type        = string
+  default     = "git@github.com:luccaluchi/oci-cloud-foundation.git"
+}
+
+variable "github_deploy_key" {
+  description = "Chave privada SSH para clonar o repo de infra"
+  type        = string
+  sensitive   = true
+}
+
+variable "git_branch" {
+  description = "Branch do GitHub para ansible-pull"
+  type        = string
+  default     = "main"
 }

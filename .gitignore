@@ -40,3 +40,6 @@ terraform.rc
 *.pem
 *.key
 
+# Ansible
+*.retry
+

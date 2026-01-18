@@ -121,7 +121,7 @@ flowchart TB
     region           = "sa-saopaulo-1"
 
     # SSH
-    ssh_public_key_content = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5..."
+    admin_vm_ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5..."
 
     # Tailscale
     tailscale_auth_key = "tskey-auth-kCY..." # Gere uma chave "Reusable" e "Ephemeral" no painel do Tailscale

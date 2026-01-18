@@ -1,0 +1,46 @@
+#cloud-config
+
+hostname: ${hostname}
+fqdn: ${hostname}.k3s.internal
+manage_etc_hosts: true
+
+packages:
+  - git
+  - ansible
+  - software-properties-common
+
+write_files:
+  - path: /etc/ansible/host_vars/localhost.yml
+    permissions: '0600'
+    owner: root:root
+    content: |
+      ---
+      tailscale_auth_key: "${tailscale_auth_key}"
+      bootstrap_hostname: "${hostname}"
+      private_subnet: "${private_subnet}"
+
+  - path: /root/.ssh/github_deploy_key
+    permissions: '0600'
+    owner: root:root
+    encoding: b64
+    content: ${github_deploy_key_b64}
+
+  - path: /root/.ssh/config
+    permissions: '0600'
+    owner: root:root
+    content: |
+      Host github.com
+        IdentityFile /root/.ssh/github_deploy_key
+        User git
+        StrictHostKeyChecking accept-new
+
+runcmd:
+  - mkdir -p /root/.ssh
+  - chmod 700 /root/.ssh
+  
+  - ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
+
+  - ansible-pull -U ${github_repo_url} \
+    -C ${git_branch} \
+    -d /opt/infra-setup \
+    ansible/nat-gateway.yml > /var/log/ansible-pull.log 2>&1

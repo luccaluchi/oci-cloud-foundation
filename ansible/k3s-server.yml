@@ -1,0 +1,201 @@
+---
+- name: Configurar K3s Server (Control Plane)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    # ajuste conforme seu VCN real
+    vcn_cidr: "10.0.0.0/16"
+
+  tasks:
+    # 1. Kernel modules
+    - name: Carregar módulos de kernel (Runtime)
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - br_netfilter
+        - overlay
+        - wireguard
+
+    - name: Persistir módulos no boot (/etc/modules-load.d/k3s.conf)
+      copy:
+        dest: /etc/modules-load.d/k3s.conf
+        content: |
+          br_netfilter
+          overlay
+          wireguard
+        owner: root
+        mode: '0644'
+
+    - name: Configurar sysctls para Kubernetes
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        sysctl_set: yes
+        reload: yes
+      loop:
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+        - { name: 'net.ipv4.conf.all.forwarding', value: '1' }
+        - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+
+    # 2. Rede e logs
+    - name: Configurar Tailscale (task include)
+      include_tasks: tasks/install_tailscale.yml
+      vars:
+        tailscale_args: "--accept-routes --ssh"
+
+    - name: Garantir configuração do Rsyslog Client
+      include_tasks: tasks/setup_rsyslog_client.yml
+
+    - name: Obter IP do Tailscale (para TLS SAN) - tolerante
+      command: tailscale ip -4
+      register: ts_ip
+      failed_when: false
+      changed_when: false
+
+    - name: Obter IP Privado
+      set_fact:
+        private_ip: "{{ ansible_default_ipv4.address }}"
+
+    # 3. Firewall UFW
+    - name: Resetar UFW (apenas no bootstrap)
+      community.general.ufw:
+        state: reset
+
+    - name: Definir políticas padrão (incoming/outgoing/routed)
+      community.general.ufw:
+        direction: "{{ item.dir }}"
+        policy: "{{ item.pol }}"
+      loop:
+        - { dir: 'incoming', pol: 'deny' }
+        - { dir: 'outgoing', pol: 'allow' }
+        - { dir: 'routed', pol: 'allow' }
+
+    - name: Liberar Portas do Control Plane e CNI
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: 6443, proto: 'tcp', comment: 'K3s API Server' }
+        - { port: 10250, proto: 'tcp', comment: 'Kubelet Metrics' }
+        - { port: 41641, proto: 'udp', comment: 'Tailscale Direct UDP' }
+        - { port: 8472, proto: 'udp', comment: 'Flannel VXLAN (fallback)' }
+        - { port: 51820, proto: 'udp', comment: 'Flannel WireGuard IPv4' }
+        - { port: 51821, proto: 'udp', comment: 'Flannel WireGuard IPv6' }
+
+    - name: Liberar NodePorts (Ingress Traffic)
+      community.general.ufw:
+        rule: allow
+        port: 30000:32767
+        proto: tcp
+        comment: 'K8s NodePorts Range'
+
+    - name: Liberar ETCD interno apenas para VCN
+      community.general.ufw:
+        rule: allow
+        src: "{{ vcn_cidr }}"
+        port: "2379:2380"
+        proto: tcp
+        comment: "ETCD internal (VCN only)"
+
+    - name: Liberar Rede Tailscale (VPN)
+      community.general.ufw:
+        rule: allow
+        src: '100.64.0.0/10'
+        comment: 'Tailscale VPN Network'
+
+    - name: Liberar interface tailscale0
+      community.general.ufw:
+        rule: allow
+        interface: tailscale0
+        direction: in
+        comment: "Allow all on tailscale0"
+
+    - name: Habilitar UFW
+      community.general.ufw:
+        state: enabled
+      notify: Reload UFW
+
+    # 4. Configuração persistente K3s
+    - name: Criar diretório /etc/rancher/k3s
+      file:
+        path: /etc/rancher/k3s
+        state: directory
+        owner: root
+        mode: '0755'
+
+    - name: Criar /etc/rancher/k3s/config.yaml
+      copy:
+        dest: /etc/rancher/k3s/config.yaml
+        content: |
+          node-ip: "{{ private_ip }}"
+          token: "{{ k3s_token }}"
+
+          tls-san:
+            - "{{ ansible_hostname }}"
+            - "{{ ts_ip.stdout | default('') }}"
+
+          disable:
+            - traefik
+            - servicelb
+
+          flannel-backend: wireguard-native
+
+          node-label:
+            - topology.kubernetes.io/region=oci-br
+            - node.kubernetes.io/instance-type=ampere
+            - node-role.kubernetes.io/worker=worker
+        owner: root
+        mode: '0644'
+      notify: Restart K3s
+
+    # 5. Install k3s
+    - name: Instalar K3s Server (idempotente)
+      shell: curl -sfL https://get.k3s.io | sh -s - server
+      environment:
+        K3S_TOKEN: "{{ k3s_token }}"
+      args:
+        creates: /usr/local/bin/k3s
+      register: install_k3s
+      failed_when: install_k3s.rc != 0 and install_k3s.rc != 1
+
+    - name: Aguardar K3s Ready (verificando node por hostname)
+      command: kubectl get node "{{ ansible_hostname }}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: k3s_ready
+      until: k3s_ready.stdout == "True"
+      retries: 60
+      delay: 10
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+
+    # 6. Remover taints para permitir workloads no control-plane (opcional)
+    - name: Remover taints do Master (Permitir Workloads)
+      shell: |
+        kubectl taint nodes "{{ ansible_hostname }}" node-role.kubernetes.io/control-plane- || true
+        kubectl taint nodes "{{ ansible_hostname }}" node-role.kubernetes.io/master- || true
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+
+  handlers:
+    - name: Restart Rsyslog
+      service:
+        name: rsyslog
+        state: restarted
+
+    - name: Restart K3s
+      service:
+        name: k3s
+        state: restarted
+
+    - name: Reload UFW
+      community.general.ufw:
+        state: reloaded

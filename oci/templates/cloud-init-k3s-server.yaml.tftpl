@@ -1,0 +1,73 @@
+#cloud-config
+hostname: ${hostname}
+fqdn: ${hostname}.k3s.internal
+manage_etc_hosts: true
+
+packages:
+  - git
+  - ansible
+  - software-properties-common
+  - rsyslog
+
+write_files:
+  - path: /etc/rsyslog.d/99-central.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Enviar todos os logs (*.*) via TCP (@@) para a VM NAT
+      *.* @@${central_log_ip}:514
+      
+      # Configuração de Fila (Safety Buffer)
+      # Se a NAT estiver reiniciando, guarda os logs em disco localmente
+      $ActionQueueFileName fwdRule1
+      $ActionQueueMaxDiskSpace 1g
+      $ActionQueueSaveOnShutdown on
+      $ActionQueueType LinkedList
+      $ActionResumeRetryCount -1
+
+  # 2. Variáveis Ansible
+  - path: /etc/ansible/host_vars/localhost.yml
+    permissions: '0600'
+    owner: root:root
+    content: |
+      ---
+      tailscale_auth_key: "${tailscale_auth_key}"
+      bootstrap_hostname: "${hostname}"
+      k3s_token: "${k3s_token}"
+      k3s_role: "server"
+      central_log_ip: "${central_log_ip}"
+
+  # 3. Chave SSH de Deploy (Base64)
+  - path: /root/.ssh/github_deploy_key
+    permissions: '0600'
+    owner: root:root
+    encoding: b64
+    content: ${github_deploy_key_b64}
+
+  # 4. Configuração SSH
+  - path: /root/.ssh/config
+    permissions: '0600'
+    owner: root:root
+    content: |
+      Host github.com
+        IdentityFile /root/.ssh/github_deploy_key
+        User git
+        StrictHostKeyChecking accept-new
+
+runcmd:
+  # 1. Aplicar configuração de logs IMEDIATAMENTE
+  - systemctl restart rsyslog
+  - logger "CLOUD-INIT: Iniciando bootstrap do K3s Server em ${hostname}"
+
+  # 2. Preparar SSH
+  - mkdir -p /root/.ssh
+  - chmod 700 /root/.ssh
+  - ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
+
+  # 3. Executar Ansible Pull
+  # O output vai para o arquivo local E para o syslog (via logger implícito do cloud-init output)
+  # O pipe com 'logger' garante que o STDOUT do ansible vá para a NAT também
+  - ansible-pull -U ${github_repo_url} \
+    -C ${git_branch} \
+    -d /opt/infra-setup \
+    ansible/k3s-server.yml 2>&1 | tee /var/log/ansible-pull.log | logger -t ansible-pull

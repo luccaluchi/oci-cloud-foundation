@@ -1,0 +1,166 @@
+---
+- name: Configurar K3s Agent (Worker Node)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  tasks:
+    # ========================================================================
+    # 1. Configuração de Kernel e Sistema
+    # ========================================================================
+    - name: Carregar módulos de kernel (Runtime)
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - br_netfilter
+        - overlay
+        - wireguard
+
+    - name: Persistir módulos no boot
+      copy:
+        dest: /etc/modules-load.d/k3s.conf
+        content: |
+          br_netfilter
+          overlay
+          wireguard
+        owner: root
+        mode: '0644'
+
+    - name: Configurar sysctls para Kubernetes
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+        - { name: 'net.ipv4.conf.all.forwarding', value: '1' }
+        - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+
+    # ========================================================================
+    # 2. Configuração de Rede e Logs (SEM TAILSCALE)
+    # ========================================================================
+    - name: Garantir configuração do Rsyslog Client
+      include_tasks: tasks/setup_rsyslog_client.yml
+
+    - name: Obter IP Privado (OCI VCN)
+      set_fact:
+        private_ip: "{{ ansible_default_ipv4.address }}"
+
+    # ========================================================================
+    # 3. Firewall (UFW)
+    # ========================================================================
+    - name: Resetar UFW
+      community.general.ufw:
+        state: reset
+
+    - name: Definir políticas padrão
+      community.general.ufw:
+        direction: "{{ item.dir }}"
+        policy: "{{ item.pol }}"
+      loop:
+        - { dir: 'incoming', pol: 'deny' }
+        - { dir: 'outgoing', pol: 'allow' }
+
+    # Como não temos Tailscale aqui, a comunicação intra-cluster depende puramente
+    # da rede privada (VCN) 10.0.0.0/16.
+    - name: Liberar Comunicação Interna da VCN (Server <-> Agents)
+      community.general.ufw:
+        rule: allow
+        src: '10.0.0.0/16'
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: 10250, proto: 'tcp', comment: 'Kubelet Metrics' }
+        # Portas CNI (Flannel/WireGuard)
+        - { port: 8472, proto: 'udp', comment: 'Flannel VXLAN' }
+        - { port: 51820, proto: 'udp', comment: 'Flannel WireGuard' }
+        - { port: 51821, proto: 'udp', comment: 'Flannel WireGuard IPv6' }
+
+    - name: Liberar NodePorts (Ingress Traffic)
+      community.general.ufw:
+        rule: allow
+        port: 30000:32767
+        proto: tcp
+        comment: 'K8s NodePorts Range'
+    
+    # Permitir SSH apenas da rede interna (vindo do NAT Gateway/Bastion)
+    - name: Liberar SSH apenas da Subnet Privada
+      community.general.ufw:
+        rule: allow
+        src: '10.0.0.0/16'
+        port: 22
+        proto: tcp
+        comment: 'SSH Internal (Bastion)'
+
+    - name: Habilitar UFW
+      community.general.ufw:
+        state: enabled
+
+    # ========================================================================
+    # 4. Instalação do K3s Agent
+    # ========================================================================
+    
+    - name: Aguardar K3s Server estar acessível (Porta 6443)
+      wait_for:
+        host: "{{ k3s_server_ip }}"
+        port: 6443
+        delay: 5
+        timeout: 600
+        state: started
+
+    - name: Criar diretório de configuração
+      file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: '0755'
+
+    - name: Criar arquivo config.yaml (Agent)
+      copy:
+        dest: /etc/rancher/k3s/config.yaml
+        content: |
+          server: "https://{{ k3s_server_ip }}:6443"
+          token: "{{ k3s_token }}"
+          node-ip: "{{ private_ip }}"
+          node-label:
+            - topology.kubernetes.io/region=oci-br
+            - node.kubernetes.io/instance-type=ampere
+            - workload=apps
+        owner: root
+        mode: '0644'
+      notify: Restart K3s Agent
+
+    - name: Instalar K3s Agent
+      shell: |
+        curl -sfL https://get.k3s.io | sh -s - agent
+      args:
+        creates: /usr/local/bin/k3s-agent
+
+    - name: Verificar se serviço está rodando
+      systemd:
+        name: k3s-agent
+        state: started
+        enabled: yes
+
+  # ========================================================================
+  # HANDLERS
+  # ========================================================================
+  handlers:
+    - name: Restart Rsyslog
+      service:
+        name: rsyslog
+        state: restarted
+
+    - name: Restart K3s Agent
+      service:
+        name: k3s-agent
+        state: restarted
+
+    - name: Reload UFW
+      community.general.ufw:
+        state: reloaded

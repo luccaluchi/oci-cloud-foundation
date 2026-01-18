@@ -4,7 +4,7 @@ tenancy_ocid     = "ocid1.tenancy.oc1..woooooow"
 region           = "your-region-x"
 private_key_path = "~/.oci/oci_api_key.pem"
 
-ssh_public_key_content = "ssh-ed25519 HeyThere"
+admin_vm_ssh_public_key = "ssh-ed25519 HeyThere"
 
 tailscale_auth_key     = "tskey-auth-aNiceKeyHere"
 
