@@ -5,6 +5,7 @@ fqdn: ${hostname}.k3s.internal
 manage_etc_hosts: true
 
 packages:
+  - curl
   - git
   - ansible
   - software-properties-common
@@ -45,7 +46,25 @@ runcmd:
   
   - ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
   - logger -t cloud-init "SSH keys configured"
-  - logger -t cloud-init "SSH keys configured"
+
+  # Instalar Tailscale prioritariamente (antes do Ansible)
+  - logger -t cloud-init "Installing Tailscale"
+  - curl -fsSL https://tailscale.com/install.sh | sh
+  - systemctl enable --now tailscaled
+  - logger -t cloud-init "Tailscale service started"
+  
+  # Autenticar Tailscale usando variável de ambiente (mais seguro)
+  - logger -t cloud-init "Authenticating Tailscale as NAT/Exit Node"
+  - |
+    TS_AUTHKEY='${tailscale_auth_key}' tailscale up \
+      --authkey="$TS_AUTHKEY" \
+      --hostname='${hostname}' \
+      --advertise-exit-node \
+      --advertise-routes='${private_subnet}' \
+      --accept-routes \
+      --ssh \
+      || logger -t cloud-init "Tailscale already authenticated"
+  - logger -t cloud-init "Tailscale configured successfully"
 
   - logger -t cloud-init "Installing Ansible collections"
   - ansible-galaxy collection install community.general ansible.posix
