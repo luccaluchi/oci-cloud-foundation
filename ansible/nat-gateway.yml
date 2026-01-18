@@ -113,95 +113,173 @@
         state: present
 
     # ========================================================================
-    # 5. UFW & NAT Rules (Optimized)
+    # 5. Firewall: Limpar Tudo e Recriar (Abordagem Simples)
     # ========================================================================
-    - name: Flush netfilter-persistent (se existir) para evitar restauração de lixo no boot
+    - name: Desabilitar UFW temporariamente
+      community.general.ufw:
+        state: disabled
+      ignore_errors: true
+
+    - name: Limpar todas as regras iptables (filter)
+      command: iptables -F
+      ignore_errors: true
+
+    - name: Limpar todas as regras iptables (nat)
+      command: iptables -t nat -F
+      ignore_errors: true
+
+    - name: Limpar todas as regras iptables (mangle)
+      command: iptables -t mangle -F
+      ignore_errors: true
+
+    - name: Limpar todas as regras iptables (raw)
+      command: iptables -t raw -F
+      ignore_errors: true
+
+    - name: Deletar chains customizadas (filter)
+      command: iptables -X
+      ignore_errors: true
+
+    - name: Deletar chains customizadas (nat)
+      command: iptables -t nat -X
+      ignore_errors: true
+
+    - name: Configurar políticas padrão
+      shell: |
+        iptables -P INPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+        iptables -P OUTPUT ACCEPT
+      ignore_errors: true
+
+    - name: Remover netfilter-persistent (conflita com UFW)
+      apt:
+        name: 
+          - netfilter-persistent
+          - iptables-persistent
+        state: absent
+        purge: yes
+      ignore_errors: true
+
+    - name: Remover regras salvas do netfilter-persistent
       file:
-        path: /etc/iptables/rules.v4
+        path: "{{ item }}"
         state: absent
-      ignore_errors: true 
+      loop:
+        - /etc/iptables/rules.v4
+        - /etc/iptables/rules.v6
+      ignore_errors: true
 
-    - name: Garantir que a regra de REJECT legado no FORWARD não exista
-      ansible.builtin.iptables:
-        chain: FORWARD
-        jump: REJECT
-        reject_with: icmp-host-prohibited
-        state: absent
+    - name: Reset completo do UFW
+      command: ufw --force reset
+      changed_when: true
 
-    - name: Definir política de Forwarding no UFW
+    - name: Configurar UFW defaults
       lineinfile:
         path: /etc/default/ufw
-        regexp: '^DEFAULT_FORWARD_POLICY='
-        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
-      notify: Reload UFW
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^DEFAULT_INPUT_POLICY=', line: 'DEFAULT_INPUT_POLICY="DROP"' }
+        - { regexp: '^DEFAULT_OUTPUT_POLICY=', line: 'DEFAULT_OUTPUT_POLICY="ACCEPT"' }
+        - { regexp: '^DEFAULT_FORWARD_POLICY=', line: 'DEFAULT_FORWARD_POLICY="ACCEPT"' }
+        - { regexp: '^IPV6=', line: 'IPV6=no' }
 
-    - name: Inserir regras de NAT (Masquerade)
+    - name: Configurar regras NAT no UFW before.rules
       blockinfile:
         path: /etc/ufw/before.rules
         insertbefore: '^\*filter'
         marker: "# {mark} ANSIBLE MANAGED NAT RULES"
         block: |
+          # NAT table rules
           *nat
           :POSTROUTING ACCEPT [0:0]
+          
+          # Forward traffic from private subnet through public interface
           -A POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
+          
           COMMIT
-      notify: Reload UFW
+      
+    - name: Configurar regras adicionais no before.rules (filter)
+      blockinfile:
+        path: /etc/ufw/before.rules
+        insertafter: '^\*filter'
+        marker: "# {mark} ANSIBLE MANAGED FILTER RULES"
+        block: |
+          # Allow all on loopback
+          -A INPUT -i lo -j ACCEPT
+          -A OUTPUT -o lo -j ACCEPT
+          
+          # Allow established/related connections
+          -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          
+          # Allow ICMP (ping, etc)
+          -A INPUT -p icmp -j ACCEPT
+          
+          # SSH apenas de redes confiáveis (Tailscale e Private Subnet)
+          -A INPUT -p tcp -s 100.64.0.0/10 --dport 22 -j ACCEPT
+          -A INPUT -p tcp -s {{ private_subnet }} --dport 22 -j ACCEPT
+          
+          # Allow Tailscale
+          -A INPUT -p udp --dport 41641 -j ACCEPT
+          -A INPUT -s 100.64.0.0/10 -j ACCEPT
+          
+          # Allow from private subnet
+          -A INPUT -s {{ private_subnet }} -j ACCEPT
+          
+          # Allow forwarding from private subnet
+          -A FORWARD -s {{ private_subnet }} -j ACCEPT
+          
+          # Allow rsyslog from private subnet
+          -A INPUT -p tcp -s {{ private_subnet }} --dport 514 -j ACCEPT
+          -A INPUT -p udp -s {{ private_subnet }} --dport 514 -j ACCEPT
 
-    - name: Aplicar regras mínimas de Firewall
-      community.general.ufw:
-        rule: allow
-        port: "{{ item.port | default(omit) }}"
-        proto: "{{ item.proto | default('any') }}"
-        src: "{{ item.src | default('any') }}"
-        comment: "{{ item.comment }}"
-      loop:
-        - { port: 22, proto: 'tcp', comment: 'SSH' }
-        - { port: 41641, proto: 'udp', comment: 'Tailscale Direct UDP' }
-        - { port: 514, src: "{{ private_subnet }}", comment: 'Syslog UDP (Private)' }
-        - { port: 514, proto: 'tcp', src: "{{ private_subnet }}", comment: 'Syslog TCP (Private)' }
-        - { src: '100.64.0.0/10', comment: 'Tailscale VPN' }
-        - { src: "{{ private_subnet }}", comment: 'Private Subnet' }
-
-    - name: Enable UFW (Ensure active)
+    - name: Habilitar UFW
       community.general.ufw:
         state: enabled
 
-    - name: Permitir tráfego roteado da subnet privada (Forwarding Explicit)
-      community.general.ufw:
-        rule: allow
-        route: yes
-        src: "{{ private_subnet }}"
-        comment: "Allow routing from private subnet"
-      notify: Reload UFW
+    - name: Garantir que UFW inicia no boot
+      systemd:
+        name: ufw
+        enabled: yes
 
     # ========================================================================
-    # 6. Verification
+    # 6. Verification & Cleanup
     # ========================================================================
-    - name: Verify IP Forwarding status
+    - name: Verificar IP Forwarding
       command: sysctl net.ipv4.ip_forward
       register: sysctl_check
       changed_when: false
       failed_when: "'= 1' not in sysctl_check.stdout"
 
-    - name: Verify NAT POSTROUTING rule
-      # Verifica se a regra existe. Usa '-C' (Check). Retorna 0 se existe.
+    - name: Verificar regra NAT POSTROUTING
       command: iptables -t nat -C POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
-      register: iptables_check
+      register: iptables_nat_check
       changed_when: false
-      failed_when: iptables_check.rc != 0
-      ignore_errors: yes # Warn only
+      failed_when: iptables_nat_check.rc != 0
+      ignore_errors: yes
 
-    - name: Check UFW status
+    - name: Verificar status UFW
       command: ufw status verbose
-      register: ufw_check
+      register: ufw_status_check
       changed_when: false
 
-    - name: Debug - Verification Results
+    - name: Exibir configuração final do firewall
       debug:
         msg:
-          - "Forwarding: {{ sysctl_check.stdout }}"
-          - "NAT Rule Exists: {{ iptables_check.rc == 0 }}"
-          - "UFW Status: {{ ufw_check.stdout_lines[0] }}"
+          - "========================================="
+          - "NAT Gateway Firewall Configuration"
+          - "========================================="
+          - "IP Forwarding: {{ 'ENABLED' if '= 1' in sysctl_check.stdout else 'DISABLED' }}"
+          - "NAT Rule: {{ 'CONFIGURED' if iptables_nat_check.rc == 0 else 'MISSING' }}"
+          - "UFW Status: {{ 'ACTIVE' if 'Status: active' in ufw_status_check.stdout else 'INACTIVE' }}"
+          - "Public Interface: {{ public_interface }}"
+          - "Private Subnet: {{ private_subnet }}"
+          - "========================================="
+
+    - name: Salvar configuração de iptables via UFW
+      command: ufw reload
+      changed_when: false
 
   handlers:
     - name: Restart Rsyslog
@@ -210,5 +288,5 @@
         state: restarted
 
     - name: Reload UFW
-      community.general.ufw:
-        state: reloaded
+      command: ufw reload
+      changed_when: true
