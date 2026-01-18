@@ -115,6 +115,19 @@
     # ========================================================================
     # 5. UFW & NAT Rules (Optimized)
     # ========================================================================
+    - name: Flush netfilter-persistent (se existir) para evitar restauração de lixo no boot
+      file:
+        path: /etc/iptables/rules.v4
+        state: absent
+      ignore_errors: true 
+
+    - name: Garantir que a regra de REJECT legado no FORWARD não exista
+      ansible.builtin.iptables:
+        chain: FORWARD
+        jump: REJECT
+        reject_with: icmp-host-prohibited
+        state: absent
+
     - name: Definir política de Forwarding no UFW
       lineinfile:
         path: /etc/default/ufw
