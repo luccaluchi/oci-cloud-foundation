@@ -1,4 +1,8 @@
 ---
+- name: Debug - Starting Tailscale installation
+  debug:
+    msg: "Installing Tailscale for {{ bootstrap_hostname }}"
+
 - name: Instalar Tailscale (Via Script Oficial)
   shell: curl -fsSL https://tailscale.com/install.sh | sh
   args:
@@ -24,3 +28,7 @@
   failed_when: 
     - ts_up.rc != 0
     - "'already' not in ts_up.stderr"
+
+- name: Debug - Tailscale authentication completed
+  debug:
+    msg: "Tailscale connected with hostname {{ bootstrap_hostname }}"

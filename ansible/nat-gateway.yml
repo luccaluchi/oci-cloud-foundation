@@ -10,6 +10,10 @@
     private_subnet: "10.0.0.0/24"
 
   tasks:
+    - name: Debug - Playbook start
+      debug:
+        msg: "Starting NAT Gateway configuration on {{ ansible_hostname }}"
+
     # ========================================================================
     # 1. Configuração de Kernel (Rede e Persistência)
     # ========================================================================
@@ -21,6 +25,10 @@
         - br_netfilter
         - overlay
         - nf_nat
+
+    - name: Debug - Kernel modules loaded
+      debug:
+        msg: "Kernel modules loaded successfully"
 
     - name: Persistir módulos no boot (/etc/modules-load.d/nat.conf)
       copy:
@@ -42,9 +50,12 @@
         - { name: 'net.ipv4.ip_forward', value: '1' }
         - { name: 'net.ipv4.conf.all.forwarding', value: '1' }
         - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
-        # Evita perda de pacotes se houver tráfego de bridge (Docker/CNI)
         - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+
+    - name: Debug - Sysctls configured
+      debug:
+        msg: "NAT and forwarding sysctls configured successfully"
 
     # ========================================================================
     # 2. Configuração do Tailscale (Router Mode)
@@ -52,10 +63,11 @@
     - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
-        # --advertise-exit-node: Permite usar essa VM como saída de internet segura
-        # --advertise-routes: Permite acessar a rede K3s (10.0.x.x) via VPN
-        # --accept-routes: Aceita rotas de outros nós
         tailscale_args: "--advertise-exit-node --advertise-routes={{ private_subnet }} --accept-routes --ssh"
+
+    - name: Debug - Tailscale configured
+      debug:
+        msg: "Tailscale configured with exit node and route advertisement for {{ private_subnet }}"
 
     # ========================================================================
     # 3. Configuração de Central de Logs (Rsyslog + lnav)
@@ -94,12 +106,20 @@
         state: present
         update_cache: yes
 
+    - name: Debug - Log server configured
+      debug:
+        msg: "Central log server configured to receive logs on port 514 (TCP/UDP)"
+
     # ========================================================================
     # 4. Configuração do UFW e NAT (A parte crítica)
     # ========================================================================
     - name: Identificar interface pública (Internet)
       set_fact:
         public_interface: "{{ ansible_default_ipv4.interface }}"
+
+    - name: Debug - Network interface identified
+      debug:
+        msg: "Public interface: {{ public_interface }}, Private subnet: {{ private_subnet }}"
 
     - name: Resetar UFW (Garantir estado limpo)
       community.general.ufw:
@@ -129,10 +149,13 @@
         block: |
           *nat
           :POSTROUTING ACCEPT [0:0]
-          # Mascarar tráfego da subnet privada ({{ private_subnet }}) saindo pela interface pública ({{ public_interface }})
           -A POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
           COMMIT
       notify: Reload UFW
+
+    - name: Debug - NAT rules configured
+      debug:
+        msg: "NAT masquerading configured for {{ private_subnet }} via {{ public_interface }}"
 
     # ========================================================================
     # 5. Regras de Firewall (Permissões)
@@ -168,6 +191,10 @@
     - name: Habilitar UFW
       community.general.ufw:
         state: enabled
+
+    - name: Debug - Playbook completed
+      debug:
+        msg: "NAT Gateway configuration completed successfully on {{ ansible_hostname }}"
 
   handlers:
     - name: Restart Rsyslog

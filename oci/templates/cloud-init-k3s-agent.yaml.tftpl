@@ -56,19 +56,28 @@ write_files:
         StrictHostKeyChecking accept-new
 
 runcmd:
+  - logger -t cloud-init "Starting rsyslog restart"
   - systemctl restart rsyslog
-  - logger "CLOUD-INIT: Iniciando bootstrap do K3s Agent em ${hostname}"
+  - logger -t cloud-init "K3s Agent bootstrap started on ${hostname}"
 
+  - logger -t cloud-init "Configuring SSH keys"
   - mkdir -p /root/.ssh
   - chmod 700 /root/.ssh
   - ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
+  - logger -t cloud-init "SSH keys configured"
+  - logger -t cloud-init "SSH keys configured"
 
+  - logger -t cloud-init "Installing Ansible collections"
   - ansible-galaxy collection install community.general ansible.posix
+  - logger -t cloud-init "Ansible collections installed"
 
+  - logger -t cloud-init "Starting ansible-pull for k3s-agent"
   - ansible-pull -U ${github_repo_url} -C ${git_branch} -d /opt/infra-setup ansible/k3s-agent.yml 2>&1 | tee /var/log/ansible-pull.log | logger -t ansible-pull
+  - logger -t cloud-init "ansible-pull completed"
+  - logger -t cloud-init "ansible-pull completed"
 
-  # Segurança: Remover credenciais sensíveis após bootstrap
+  - logger -t cloud-init "Starting cleanup of sensitive credentials"
   - sleep 5
   - shred -u /root/.ssh/github_deploy_key || true
   - sed -i '/k3s_token:/d' /etc/ansible/host_vars/localhost.yml || true
-  - logger "CLOUD-INIT: Credenciais sensíveis removidas após bootstrap"
+  - logger -t cloud-init "Cleanup completed - bootstrap finished"

@@ -6,6 +6,10 @@
   gather_facts: true
 
   tasks:
+    - name: Debug - Playbook start
+      debug:
+        msg: "Starting K3s Agent configuration on {{ ansible_hostname }}"
+
     # ========================================================================
     # 1. Configuração de Kernel e Sistema
     # ========================================================================
@@ -17,6 +21,10 @@
         - br_netfilter
         - overlay
         - wireguard
+
+    - name: Debug - Kernel modules loaded
+      debug:
+        msg: "Kernel modules loaded successfully"
 
     - name: Persistir módulos no boot
       copy:
@@ -41,15 +49,27 @@
         - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
 
+    - name: Debug - Sysctls configured
+      debug:
+        msg: "Kubernetes sysctls configured successfully"
+
     # ========================================================================
     # 2. Configuração de Rede e Logs (SEM TAILSCALE)
     # ========================================================================
     - name: Garantir configuração do Rsyslog Client
       include_tasks: tasks/setup_rsyslog_client.yml
 
+    - name: Debug - Rsyslog configured
+      debug:
+        msg: "Rsyslog client configured successfully"
+
     - name: Obter IP Privado (OCI VCN)
       set_fact:
         private_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Debug - Private IP obtained
+      debug:
+        msg: "Private IP: {{ private_ip }}"
 
     # ========================================================================
     # 3. Firewall (UFW)
@@ -102,6 +122,10 @@
       community.general.ufw:
         state: enabled
 
+    - name: Debug - UFW configured
+      debug:
+        msg: "UFW configured and enabled successfully"
+
     # ========================================================================
     # 4. Instalação do K3s Agent
     # ========================================================================
@@ -113,6 +137,10 @@
         delay: 5
         timeout: 600
         state: started
+
+    - name: Debug - K3s Server is reachable
+      debug:
+        msg: "K3s Server {{ k3s_server_ip }}:6443 is accessible"
 
     - name: Criar diretório de configuração
       file:
@@ -141,11 +169,19 @@
       args:
         creates: /usr/local/bin/k3s-agent
 
+    - name: Debug - K3s Agent installed
+      debug:
+        msg: "K3s Agent installation completed"
+
     - name: Verificar se serviço está rodando
       systemd:
         name: k3s-agent
         state: started
         enabled: yes
+
+    - name: Debug - Playbook completed
+      debug:
+        msg: "K3s Agent configuration completed successfully on {{ ansible_hostname }}"
 
   # ========================================================================
   # HANDLERS

@@ -1,14 +1,14 @@
 ---
+- name: Debug - Configuring rsyslog client
+  debug:
+    msg: "Configuring rsyslog to forward logs to {{ central_log_ip }}"
+
 - name: Configurar envio de logs para o servidor central (Rsyslog)
   copy:
     dest: /etc/rsyslog.d/99-central.conf
     content: |
-      # Enviar todos os logs (*.*) via TCP (@@) para o servidor central
-      # A variável central_log_ip vem do host_vars/localhost.yml
       *.* @@{{ central_log_ip }}:514
 
-      # Configuração de Fila (Disk-Assisted Queue)
-      # Garante que logs não sejam perdidos se a NAT cair
       $ActionQueueFileName fwdRule1
       $ActionQueueMaxDiskSpace 1g
       $ActionQueueSaveOnShutdown on
@@ -18,3 +18,7 @@
     group: root
     mode: '0644'
   notify: Restart Rsyslog
+
+- name: Debug - Rsyslog client configured
+  debug:
+    msg: "Rsyslog client configured to forward to {{ central_log_ip }}:514"

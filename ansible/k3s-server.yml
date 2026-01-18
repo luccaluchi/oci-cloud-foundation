@@ -10,6 +10,10 @@
     vcn_cidr: "10.0.0.0/16"
 
   tasks:
+    - name: Debug - Playbook start
+      debug:
+        msg: "Starting K3s Server configuration on {{ ansible_hostname }}"
+
     # 1. Kernel modules
     - name: Carregar módulos de kernel (Runtime)
       community.general.modprobe:
@@ -19,6 +23,10 @@
         - br_netfilter
         - overlay
         - wireguard
+
+    - name: Debug - Kernel modules loaded
+      debug:
+        msg: "Kernel modules loaded successfully"
 
     - name: Persistir módulos no boot (/etc/modules-load.d/k3s.conf)
       copy:
@@ -43,11 +51,19 @@
         - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
 
+    - name: Debug - Sysctls configured
+      debug:
+        msg: "Kubernetes sysctls configured successfully"
+
     # 2. Rede e logs
     - name: Configurar Tailscale (task include)
       include_tasks: tasks/install_tailscale.yml
       vars:
         tailscale_args: "--accept-routes --ssh"
+
+    - name: Debug - Tailscale configured
+      debug:
+        msg: "Tailscale configured successfully"
 
     - name: Garantir configuração do Rsyslog Client
       include_tasks: tasks/setup_rsyslog_client.yml
@@ -61,6 +77,10 @@
     - name: Obter IP Privado
       set_fact:
         private_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Debug - Network IPs obtained
+      debug:
+        msg: "Private IP: {{ private_ip }}, Tailscale IP: {{ ts_ip.stdout | default('not available') }}"
 
     # 3. Firewall UFW
     - name: Resetar UFW (apenas no bootstrap)
@@ -123,6 +143,10 @@
         state: enabled
       notify: Reload UFW
 
+    - name: Debug - UFW configured
+      debug:
+        msg: "UFW configured and enabled successfully"
+
     # 4. Configuração persistente K3s
     - name: Criar diretório /etc/rancher/k3s
       file:
@@ -166,6 +190,10 @@
       register: install_k3s
       failed_when: install_k3s.rc != 0 and install_k3s.rc != 1
 
+    - name: Debug - K3s Server installation completed
+      debug:
+        msg: "K3s Server installation completed, waiting for ready status"
+
     - name: Aguardar K3s Ready (verificando node por hostname)
       command: kubectl get node "{{ ansible_hostname }}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
       register: k3s_ready
@@ -184,6 +212,10 @@
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
       changed_when: false
+
+    - name: Debug - Playbook completed
+      debug:
+        msg: "K3s Server configuration completed successfully on {{ ansible_hostname }}"
 
   handlers:
     - name: Restart Rsyslog
