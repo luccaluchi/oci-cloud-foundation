@@ -153,6 +153,14 @@
       community.general.ufw:
         state: enabled
 
+    - name: Permitir tráfego roteado da subnet privada (Forwarding Explicit)
+      community.general.ufw:
+        rule: allow
+        route: yes
+        src: "{{ private_subnet }}"
+        comment: "Allow routing from private subnet"
+      notify: Reload UFW
+
     # ========================================================================
     # 6. Verification
     # ========================================================================
