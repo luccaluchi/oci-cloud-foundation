@@ -1,0 +1,81 @@
+---
+# Task file reutilizável para limpar completamente o firewall
+# e configurar UFW como única fonte de verdade
+# 
+# Padrões restritivos (podem ser sobrescritos):
+#   ufw_input_policy: DROP
+#   ufw_output_policy: ACCEPT
+#   ufw_forward_policy: DROP
+#   ufw_ipv6_enabled: no
+#
+# Uso:
+#   - name: Limpar firewall
+#     include_tasks: tasks/cleanup_firewall.yml
+#     vars:
+#       ufw_forward_policy: ACCEPT  # customizar conforme necessário
+#       ufw_ipv6_enabled: yes
+
+- name: Desabilitar UFW temporariamente
+  community.general.ufw:
+    state: disabled
+  ignore_errors: true
+
+- name: Flush completo iptables (filter)
+  command: iptables -F
+  ignore_errors: true
+
+- name: Flush completo iptables (nat)
+  command: iptables -t nat -F
+  ignore_errors: true
+
+- name: Flush completo iptables (mangle)
+  command: iptables -t mangle -F
+  ignore_errors: true
+
+- name: Deletar chains customizadas
+  command: "{{ item }}"
+  loop:
+    - iptables -X
+    - iptables -t nat -X
+    - iptables -t mangle -X
+  ignore_errors: true
+
+- name: Configurar políticas padrão como ACCEPT
+  shell: |
+    iptables -P INPUT ACCEPT
+    iptables -P FORWARD ACCEPT
+    iptables -P OUTPUT ACCEPT
+  ignore_errors: true
+
+- name: Remover pacotes conflitantes
+  apt:
+    name:
+      - netfilter-persistent
+      - iptables-persistent
+    state: absent
+    purge: yes
+  ignore_errors: true
+
+- name: Remover regras salvas
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/iptables/rules.v4
+    - /etc/iptables/rules.v6
+  ignore_errors: true
+
+- name: Reset completo UFW
+  command: ufw --force reset
+  changed_when: true
+
+- name: Configurar UFW defaults
+  lineinfile:
+    path: /etc/default/ufw
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+    - { regexp: '^DEFAULT_INPUT_POLICY=', line: 'DEFAULT_INPUT_POLICY="{{ ufw_input_policy | default("DROP") }}"' }
+    - { regexp: '^DEFAULT_OUTPUT_POLICY=', line: 'DEFAULT_OUTPUT_POLICY="{{ ufw_output_policy | default("ACCEPT") }}"' }
+    - { regexp: '^DEFAULT_FORWARD_POLICY=', line: 'DEFAULT_FORWARD_POLICY="{{ ufw_forward_policy | default("DROP") }}"' }
+    - { regexp: '^IPV6=', line: 'IPV6={{ ufw_ipv6_enabled | default("no") }}' }

@@ -83,61 +83,11 @@
         msg: "Private IP: {{ private_ip }}, Tailscale IP: {{ ts_ip.stdout | default('not available') }}"
 
     # 3. Firewall UFW (Única Fonte de Verdade)
-    - name: Desabilitar UFW temporariamente
-      community.general.ufw:
-        state: disabled
-      ignore_errors: true
-
-    - name: Flush completo iptables (filter)
-      command: iptables -F
-      ignore_errors: true
-
-    - name: Flush completo iptables (nat)
-      command: iptables -t nat -F
-      ignore_errors: true
-
-    - name: Flush completo iptables (mangle)
-      command: iptables -t mangle -F
-      ignore_errors: true
-
-    - name: Deletar chains customizadas
-      command: "{{ item }}"
-      loop:
-        - iptables -X
-        - iptables -t nat -X
-        - iptables -t mangle -X
-      ignore_errors: true
-
-    - name: Configurar políticas padrão como ACCEPT
-      shell: |
-        iptables -P INPUT ACCEPT
-        iptables -P FORWARD ACCEPT
-        iptables -P OUTPUT ACCEPT
-      ignore_errors: true
-
-    - name: Remover pacotes conflitantes
-      apt:
-        name:
-          - netfilter-persistent
-          - iptables-persistent
-        state: absent
-        purge: yes
-      ignore_errors: true
-
-    - name: Reset completo UFW
-      command: ufw --force reset
-      changed_when: true
-
-    - name: Configurar UFW defaults
-      lineinfile:
-        path: /etc/default/ufw
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      loop:
-        - { regexp: '^DEFAULT_INPUT_POLICY=', line: 'DEFAULT_INPUT_POLICY="DROP"' }
-        - { regexp: '^DEFAULT_OUTPUT_POLICY=', line: 'DEFAULT_OUTPUT_POLICY="ACCEPT"' }
-        - { regexp: '^DEFAULT_FORWARD_POLICY=', line: 'DEFAULT_FORWARD_POLICY="ACCEPT"' }
-        - { regexp: '^IPV6=', line: 'IPV6=yes' }
+    - name: Limpar firewall e configurar UFW como única fonte de verdade
+      include_tasks: tasks/cleanup_firewall.yml
+      vars:
+        ufw_forward_policy: ACCEPT  # Necessário para CNI (Flannel)
+        ufw_ipv6_enabled: yes       # Kubernetes IPv6 support
 
     - name: Liberar portas essenciais do K3s Server
       community.general.ufw:

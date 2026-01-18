@@ -115,63 +115,10 @@
     # ========================================================================
     # 5. Firewall: Limpar Tudo e Recriar (Abordagem Simples)
     # ========================================================================
-    - name: Desabilitar UFW temporariamente
-      community.general.ufw:
-        state: disabled
-      ignore_errors: true
-
-    - name: Limpar todas as regras iptables (filter)
-      command: iptables -F
-      ignore_errors: true
-
-    - name: Limpar todas as regras iptables (nat)
-      command: iptables -t nat -F
-      ignore_errors: true
-
-    - name: Limpar todas as regras iptables (mangle)
-      command: iptables -t mangle -F
-      ignore_errors: true
-
-    - name: Limpar todas as regras iptables (raw)
-      command: iptables -t raw -F
-      ignore_errors: true
-
-    - name: Deletar chains customizadas (filter)
-      command: iptables -X
-      ignore_errors: true
-
-    - name: Deletar chains customizadas (nat)
-      command: iptables -t nat -X
-      ignore_errors: true
-
-    - name: Configurar políticas padrão
-      shell: |
-        iptables -P INPUT ACCEPT
-        iptables -P FORWARD ACCEPT
-        iptables -P OUTPUT ACCEPT
-      ignore_errors: true
-
-    - name: Remover netfilter-persistent (conflita com UFW)
-      apt:
-        name: 
-          - netfilter-persistent
-          - iptables-persistent
-        state: absent
-        purge: yes
-      ignore_errors: true
-
-    - name: Remover regras salvas do netfilter-persistent
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /etc/iptables/rules.v4
-        - /etc/iptables/rules.v6
-      ignore_errors: true
-
-    - name: Reset completo do UFW
-      command: ufw --force reset
-      changed_when: true
+    - name: Limpar firewall e configurar UFW como única fonte de verdade
+      include_tasks: tasks/cleanup_firewall.yml
+      vars:
+        ufw_forward_policy: ACCEPT  # Necessário para NAT/routing
 
     - name: Configurar UFW defaults
       lineinfile:
