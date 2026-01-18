@@ -79,7 +79,6 @@ resource "oci_core_instance" "nat" {
       github_deploy_key_b64 = base64encode(var.github_deploy_key)
       github_repo_url    = var.github_repo_url
       git_branch         = var.git_branch
-      central_log_ip = data.oci_core_vnic.nat_vnic[0].private_ip_address
     }))
   }
 
@@ -214,6 +213,7 @@ resource "oci_core_instance" "k3s_worker_arm" {
       tailscale_auth_key = var.tailscale_auth_key
       hostname           = local.hostnames.worker_arm[count.index]
       k3s_token          = random_password.k3s_token.result
+      k3s_server_ip      = data.oci_core_vnic.server_vnic[0].private_ip_address
       github_deploy_key_b64 = base64encode(var.github_deploy_key)
       github_repo_url    = var.github_repo_url
       git_branch         = var.git_branch
@@ -267,6 +267,7 @@ resource "oci_core_instance" "k3s_worker_amd" {
       tailscale_auth_key = var.tailscale_auth_key
       hostname           = local.hostnames.worker_amd[count.index]
       k3s_token          = random_password.k3s_token.result
+      k3s_server_ip      = data.oci_core_vnic.server_vnic[0].private_ip_address
       github_deploy_key_b64 = base64encode(var.github_deploy_key)
       github_repo_url    = var.github_repo_url
       git_branch         = var.git_branch

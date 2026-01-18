@@ -185,21 +185,21 @@ resource "oci_core_network_security_group_security_rule" "nat_egress_all" {
   description               = "All outbound for NAT"
 }
 
-# NAT Ingress: SSH do IP do administrador
-# resource "oci_core_network_security_group_security_rule" "nat_ingress_ssh" {
-#   network_security_group_id = oci_core_network_security_group.nat_nsg.id
-#   direction                 = "INGRESS"
-#   protocol                  = "6" # TCP
-#   source                    = "209.14.149.101/32"
-#   source_type               = "CIDR_BLOCK"
-#   description               = "SSH from admin IP"
-#   tcp_options {
-#     destination_port_range {
-#       min = 22
-#       max = 22
-#     }
-#   }
-# }
+#NAT Ingress: SSH do IP do administrador
+resource "oci_core_network_security_group_security_rule" "nat_ingress_ssh" {
+  network_security_group_id = oci_core_network_security_group.nat_nsg.id
+  direction                 = "INGRESS"
+  protocol                  = "6" # TCP
+  source                    = "186.247.227.11/32"
+  source_type               = "CIDR_BLOCK"
+  description               = "SSH from admin IP"
+  tcp_options {
+    destination_port_range {
+      min = 22
+      max = 22
+    }
+  }
+}
 
 # NAT Ingress: Tailscale UDP (conexao direta P2P)
 resource "oci_core_network_security_group_security_rule" "nat_ingress_tailscale_udp" {

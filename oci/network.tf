@@ -23,6 +23,11 @@ resource "oci_core_internet_gateway" "main" {
 # ----------------------------------------------------------------------------
 # Route Tables
 # ----------------------------------------------------------------------------
+# Recuperar o objeto Private IP da VM NAT (para pegar o ID)
+data "oci_core_private_ips" "nat_private_ip" {
+  count = local.selected.amd_nat_enabled ? 1 : 0
+  vnic_id = data.oci_core_vnic.nat_vnic[0].id
+}
 
 # Route Table Pública (LB + NAT VM → Internet Gateway)
 resource "oci_core_route_table" "public" {
