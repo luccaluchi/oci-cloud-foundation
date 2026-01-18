@@ -40,6 +40,11 @@ write_files:
       github_repo_url: "${github_repo_url}"
       git_branch: "${git_branch}"
 
+  - path: /root/.ts_auth_key
+    permissions: '0600'
+    owner: root:root
+    content: "${tailscale_auth_key}"
+
   - path: /root/.ssh/github_deploy_key
     permissions: '0600'
     owner: root:root
@@ -73,11 +78,11 @@ runcmd:
   
   - logger -t cloud-init "Authenticating Tailscale"
   - |
-    TS_AUTHKEY='${tailscale_auth_key}' tailscale up \
-      --authkey="$TS_AUTHKEY" \
+    timeout 60s tailscale up \
+      --authkey="$(cat /root/.ts_auth_key)" \
       --hostname='${hostname}' \
       --ssh \
-      || logger -t cloud-init "Tailscale already authenticated"
+      || logger -t cloud-init "Tailscale authentication failed or timed out"
   - logger -t cloud-init "Tailscale configured successfully"
 
   - logger -t cloud-init "Installing Ansible collections"
@@ -92,6 +97,7 @@ runcmd:
   - logger -t cloud-init "Starting cleanup of sensitive credentials"
   - sleep 5
   - shred -u /root/.ssh/github_deploy_key || true
+  - shred -u /root/.ts_auth_key || true
   - sed -i '/k3s_token:/d' /etc/ansible/host_vars/localhost.yml || true
   - sed -i '/tailscale_auth_key:/d' /etc/ansible/host_vars/localhost.yml || true
   - logger -t cloud-init "Cleanup completed - bootstrap finished"

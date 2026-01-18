@@ -14,14 +14,30 @@
     enabled: yes
     state: started
 
+- name: Check Tailscale status
+  command: tailscale status
+  register: tailscale_status
+  failed_when: false
+  changed_when: false
+
 - name: Autenticar Tailscale
   shell: |
+    if [ -f /root/.ts_auth_key ]; then
+      export TS_AUTHKEY=$(cat /root/.ts_auth_key)
+    fi
+    
+    # Se ja estiver logado, evita reautenticacao forcada se a chave nao existir
+    if tailscale status > /dev/null 2>&1 && [ -z "$TS_AUTHKEY" ]; then
+      echo "Tailscale already authenticated and no key provided. Skipping auth."
+      exit 0
+    fi
+
     tailscale up \
-      --authkey="$TS_AUTHKEY" \
+      --authkey="${TS_AUTHKEY:-}" \
       --hostname={{ bootstrap_hostname }} \
       {{ tailscale_args | default('') }}
   environment:
-    TS_AUTHKEY: "{{ tailscale_auth_key }}"
+    TS_AUTHKEY: "{{ tailscale_auth_key | default('') }}"
   register: ts_up
   no_log: true
   changed_when: "'Success' in ts_up.stdout"
