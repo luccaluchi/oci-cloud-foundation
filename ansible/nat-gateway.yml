@@ -63,7 +63,7 @@
     - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
-        tailscale_args: "--advertise-exit-node --advertise-routes={{ private_subnet }} --accept-routes --ssh"
+        tailscale_args: "--ssh"
 
     - name: Debug - Tailscale configured
       debug:

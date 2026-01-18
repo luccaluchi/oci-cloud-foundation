@@ -68,19 +68,16 @@ runcmd:
   - ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
   - logger -t cloud-init "SSH keys configured"
 
-  # Instalar Tailscale prioritariamente (antes do Ansible)
   - logger -t cloud-init "Installing Tailscale"
   - curl -fsSL https://tailscale.com/install.sh | sh
   - systemctl enable --now tailscaled
   - logger -t cloud-init "Tailscale service started"
   
-  # Autenticar Tailscale usando variável de ambiente (mais seguro)
   - logger -t cloud-init "Authenticating Tailscale"
   - |
     TS_AUTHKEY='${tailscale_auth_key}' tailscale up \
       --authkey="$TS_AUTHKEY" \
       --hostname='${hostname}' \
-      --accept-routes \
       --ssh \
       || logger -t cloud-init "Tailscale already authenticated"
   - logger -t cloud-init "Tailscale configured successfully"

@@ -59,7 +59,7 @@
     - name: Configurar Tailscale (task include)
       include_tasks: tasks/install_tailscale.yml
       vars:
-        tailscale_args: "--accept-routes --ssh"
+        tailscale_args: "--ssh"
 
     - name: Debug - Tailscale configured
       debug:
