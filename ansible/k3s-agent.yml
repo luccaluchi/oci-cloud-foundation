@@ -11,7 +11,16 @@
         msg: "Starting K3s Agent configuration on {{ ansible_hostname }}"
 
     # ========================================================================
-    # 1. Configuração de Kernel e Sistema
+    # 1. Firewall Cleanup (Prioridade Máxima)
+    # ========================================================================
+    - name: Limpar firewall e configurar UFW como única fonte de verdade
+      include_tasks: tasks/cleanup_firewall.yml
+      vars:
+        ufw_forward_policy: ACCEPT  # Necessário para CNI (Flannel)
+        ufw_ipv6_enabled: yes       # Kubernetes IPv6 support
+
+    # ========================================================================
+    # 2. Configuração de Kernel e Sistema
     # ========================================================================
     - name: Carregar módulos de kernel (Runtime)
       community.general.modprobe:
@@ -77,14 +86,9 @@
         msg: "Private IP: {{ private_ip }}"
 
     # ========================================================================
-    # 3. Firewall (UFW - Única Fonte de Verdade)
+    # 3. Firewall Rules (UFW)
     # ========================================================================
-    - name: Limpar firewall e configurar UFW como única fonte de verdade
-      include_tasks: tasks/cleanup_firewall.yml
-      vars:
-        ufw_forward_policy: ACCEPT  # Necessário para CNI (Flannel)
-        ufw_ipv6_enabled: yes       # Kubernetes IPv6 support
-
+    
     - name: Liberar portas essenciais do K3s Agent (apenas VCN)
       community.general.ufw:
         rule: allow
@@ -99,8 +103,6 @@
         - { port: 8472, proto: 'udp', comment: 'Flannel VXLAN' }
         - { port: 51820, proto: 'udp', comment: 'Flannel WireGuard' }
         - { port: 51821, proto: 'udp', comment: 'Flannel WireGuard IPv6' }
-        # SSH
-        - { port: 22, proto: 'tcp', comment: 'SSH (VCN)' }
 
     - name: Liberar NodePorts da VCN
       community.general.ufw:
@@ -110,22 +112,29 @@
         src: '10.0.0.0/16'
         comment: 'NodePorts (VCN)'
 
-    - name: Liberar Tailscale
+    - name: Liberar Tailscale UDP
       community.general.ufw:
         rule: allow
-        port: "{{ item.port }}"
-        proto: "{{ item.proto }}"
-        src: "{{ item.src | default('any') }}"
-        comment: "{{ item.comment }}"
-      loop:
-        - { port: 41641, proto: 'udp', comment: 'Tailscale UDP' }
-        - { port: 22, proto: 'tcp', src: '100.64.0.0/10', comment: 'SSH (Tailscale)' }
+        port: 41641
+        proto: udp
+        comment: 'Tailscale UDP'
 
     - name: Liberar toda rede Tailscale
       community.general.ufw:
         rule: allow
         src: '100.64.0.0/10'
         comment: 'Tailscale VPN'
+
+    - name: SSH apenas de Tailscale e subnet privada
+      community.general.ufw:
+        rule: allow
+        port: 22
+        proto: tcp
+        src: "{{ item }}"
+        comment: "SSH {{ item }}"
+      loop:
+        - '100.64.0.0/10'
+        - '10.0.0.0/16'
 
     - name: Habilitar UFW
       community.general.ufw:

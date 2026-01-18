@@ -14,7 +14,18 @@
       debug:
         msg: "Starting K3s Server configuration on {{ ansible_hostname }}"
 
-    # 1. Kernel modules
+    # ========================================================================
+    # 1. Firewall Cleanup (Prioridade Máxima)
+    # ========================================================================
+    - name: Limpar firewall e configurar UFW como única fonte de verdade
+      include_tasks: tasks/cleanup_firewall.yml
+      vars:
+        ufw_forward_policy: ACCEPT  # Necessário para CNI (Flannel)
+        ufw_ipv6_enabled: yes       # Kubernetes IPv6 support
+
+    # ========================================================================
+    # 2. Kernel & System
+    # ========================================================================
     - name: Carregar módulos de kernel (Runtime)
       community.general.modprobe:
         name: "{{ item }}"
@@ -82,12 +93,9 @@
       debug:
         msg: "Private IP: {{ private_ip }}, Tailscale IP: {{ ts_ip.stdout | default('not available') }}"
 
-    # 3. Firewall UFW (Única Fonte de Verdade)
-    - name: Limpar firewall e configurar UFW como única fonte de verdade
-      include_tasks: tasks/cleanup_firewall.yml
-      vars:
-        ufw_forward_policy: ACCEPT  # Necessário para CNI (Flannel)
-        ufw_ipv6_enabled: yes       # Kubernetes IPv6 support
+    # ========================================================================
+    # 3. Firewall Rules
+    # ========================================================================
 
     - name: Liberar portas essenciais do K3s Server
       community.general.ufw:
@@ -109,7 +117,7 @@
         - { port: 51820, proto: 'udp', src: '{{ vcn_cidr }}', comment: 'Flannel WireGuard' }
         - { port: 51821, proto: 'udp', src: '{{ vcn_cidr }}', comment: 'Flannel WireGuard IPv6' }
         # Tailscale
-        - { port: 41641, proto: 'udp', comment: 'Tailscale UDP' }
+        - { port: 41641, proto: 'udp', src: 'any', comment: 'Tailscale UDP' }
 
     - name: Liberar NodePorts da VCN
       community.general.ufw:
@@ -134,7 +142,7 @@
         comment: "SSH {{ item }}"
       loop:
         - '100.64.0.0/10'
-        - '10.0.10.0/24'
+        - '{{ vcn_cidr }}'
 
     - name: Habilitar UFW
       community.general.ufw:

@@ -15,7 +15,15 @@
         msg: "Starting NAT Gateway configuration on {{ ansible_hostname }}"
 
     # ========================================================================
-    # 1. Interface Detection & Facts
+    # 1. Firewall Cleanup (Prioridade Máxima)
+    # ========================================================================
+    - name: Limpar firewall e configurar UFW como única fonte de verdade
+      include_tasks: tasks/cleanup_firewall.yml
+      vars:
+        ufw_forward_policy: ACCEPT  # Necessário para NAT/routing
+
+    # ========================================================================
+    # 2. Interface Detection & Facts
     # ========================================================================
     - name: Detect active public interface
       shell: ip route get 8.8.8.8 | grep -oP 'dev \K\S+' | head -n1
@@ -37,23 +45,19 @@
         msg: "Using public interface: {{ public_interface }} for NAT"
 
     # ========================================================================
-    # 2. Kernel & Sysctl (Modern)
+    # 3. Kernel & Sysctl (Modern)
     # ========================================================================
     - name: Carregar módulos de kernel
       community.general.modprobe:
         name: "{{ item }}"
         state: present
       loop:
-        - br_netfilter
-        - overlay
         - nf_nat
 
     - name: Persistir módulos no boot (/etc/modules-load.d/nat.conf)
       copy:
         dest: /etc/modules-load.d/nat.conf
         content: |
-          br_netfilter
-          overlay
           nf_nat
         owner: root
         mode: '0644'
@@ -117,19 +121,8 @@
     # ========================================================================
     - name: Limpar firewall e configurar UFW como única fonte de verdade
       include_tasks: tasks/cleanup_firewall.yml
-      vars:
-        ufw_forward_policy: ACCEPT  # Necessário para NAT/routing
-
-    - name: Configurar UFW defaults
-      lineinfile:
-        path: /etc/default/ufw
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      loop:
-        - { regexp: '^DEFAULT_INPUT_POLICY=', line: 'DEFAULT_INPUT_POLICY="DROP"' }
-        - { regexp: '^DEFAULT_OUTPUT_POLICY=', line: 'DEFAULT_OUTPUT_POLICY="ACCEPT"' }
-        - { regexp: '^DEFAULT_FORWARD_POLICY=', line: 'DEFAULT_FORWARD_POLICY="ACCEPT"' }
-        - { regexp: '^IPV6=', line: 'IPV6=no' }
+      6. Firewall Rules
+    # ========================================================================
 
     - name: Configurar regras NAT no UFW before.rules
       blockinfile:
@@ -145,41 +138,43 @@
           -A POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
           
           COMMIT
-      
-    - name: Configurar regras adicionais no before.rules (filter)
-      blockinfile:
-        path: /etc/ufw/before.rules
-        insertafter: '^\*filter'
-        marker: "# {mark} ANSIBLE MANAGED FILTER RULES"
-        block: |
-          # Allow all on loopback
-          -A INPUT -i lo -j ACCEPT
-          -A OUTPUT -o lo -j ACCEPT
-          
-          # Allow established/related connections
-          -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-          -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-          
-          # Allow ICMP (ping, etc)
-          -A INPUT -p icmp -j ACCEPT
-          
-          # SSH apenas de redes confiáveis (Tailscale e Private Subnet)
-          -A INPUT -p tcp -s 100.64.0.0/10 --dport 22 -j ACCEPT
-          -A INPUT -p tcp -s {{ private_subnet }} --dport 22 -j ACCEPT
-          
-          # Allow Tailscale
-          -A INPUT -p udp --dport 41641 -j ACCEPT
-          -A INPUT -s 100.64.0.0/10 -j ACCEPT
-          
-          # Allow from private subnet
-          -A INPUT -s {{ private_subnet }} -j ACCEPT
-          
-          # Allow forwarding from private subnet
-          -A FORWARD -s {{ private_subnet }} -j ACCEPT
-          
-          # Allow rsyslog from private subnet
-          -A INPUT -p tcp -s {{ private_subnet }} --dport 514 -j ACCEPT
-          -A INPUT -p udp -s {{ private_subnet }} --dport 514 -j ACCEPT
+  port: 22
+        proto: tcp
+        src: "{{ item }}"
+        comment: "SSH {{ item }}"
+      loop:
+        - '100.64.0.0/10'
+        - '{{ private_subnet }}'
+
+    - name: Liberar Tailscale UDP
+      community.general.ufw:
+        rule: allow
+        port: 41641
+        proto: udp
+        comment: "Tailscale Direct UDP"
+
+    - name: Liberar rede Tailscale
+      community.general.ufw:
+        rule: allow
+        src: '100.64.0.0/10'
+        comment: "Allow Tailscale Network"
+
+    - name: Liberar rede privada
+      community.general.ufw:
+        rule: allow
+        src: "{{ private_subnet }}"
+        comment: "Allow Private Subnet"
+
+    - name: Liberar Rsyslog da rede privada
+      community.general.ufw:
+        rule: allow
+        port: 514
+        proto: "{{ item }}"
+        src: "{{ private_subnet }}"
+        comment: "Rsyslog"
+      loop:
+        - tcp
+        - udp
 
     - name: Habilitar UFW
       community.general.ufw:
