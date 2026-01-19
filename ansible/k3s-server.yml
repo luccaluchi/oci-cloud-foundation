@@ -133,6 +133,12 @@
         src: '100.64.0.0/10'
         comment: 'Tailscale VPN'
 
+    - name: Liberar Pod CIDR (10.42.0.0/16)
+      community.general.ufw:
+        rule: allow
+        src: '10.42.0.0/16'
+        comment: 'Pod CIDR (Cluster DNS/Probes)'
+
     - name: SSH apenas de Tailscale e subnet privada
       community.general.ufw:
         rule: allow
