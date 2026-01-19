@@ -1,13 +1,58 @@
-user_ocid        = "ocid1.user.oc1..omgAlotOfCharacter"
-fingerprint      = "crazy numbers and letters"
-tenancy_ocid     = "ocid1.tenancy.oc1..woooooow"
-region           = "your-region-x"
-private_key_path = "~/.oci/oci_api_key.pem"
+# ==============================================================================
+# 1. Autenticação OCI (Oracle Cloud Infrastructure)
+# ==============================================================================
+# Obtenha estes dados no console OCI em: Profile -> API Keys
+tenancy_ocid     = "ocid1.tenancy.oc1..aaaaa..."
+user_ocid        = "ocid1.user.oc1..aaaaa..."
+fingerprint      = "xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx"
+region           = "sa-saopaulo-1"
+private_key_path = "/caminho/absoluto/para/sua/chave_api_oracle.pem"
 
-admin_vm_ssh_public_key = "ssh-ed25519 HeyThere"
+# ==============================================================================
+# 2. Acesso e Segurança (SSH)
+# ==============================================================================
+# Conteúdo da sua chave PÚBLICA (ex: cat ~/.ssh/id_ed25519.pub)
+# Esta chave será adicionada ao authorized_keys do usuário 'ubuntu' nas VMs.
+admin_vm_ssh_public_key = "ssh-ed25519 AAAA..."
 
-tailscale_auth_key     = "tskey-auth-aNiceKeyHere"
+# ==============================================================================
+# 3. Rede e VPN (Tailscale)
+# ==============================================================================
+# Gere chaves em: https://login.tailscale.com/admin/settings/keys
+# Configure como: "Reusable", "Ephemeral" e com a Tag apropriada.
+# LÓGICA: O Terraform dará prioridade às chaves específicas (Opção B). 
+# Se a específica for 'null', ele usará a chave genérica (Opção A).
 
-# Budget
+# [OPÇÃO A - GENÉRICA] Chave de Fallback
+# Usada para qualquer VM que não tenha uma chave específica definida abaixo.
+tailscale_auth_key = "tskey-auth-aaaaa..."
+
+# [OPÇÃO B - ESPECÍFICA] Chaves por Função (Recomendado para Tags Automáticas)
+# Se descomentadas e preenchidas, estas chaves sobrescrevem a Opção A para sua respectiva função.
+# tailscale_auth_key_nat    = "tskey-auth-..." # Tag sugerida: tag:nat
+# tailscale_auth_key_server = "tskey-auth-..." # Tag sugerida: tag:k3s-server
+# tailscale_auth_key_agent  = "tskey-auth-..." # Tag sugerida: tag:k3s-agent
+
+# ==============================================================================
+# 4. Controle de Custos (Budget)
+# ==============================================================================
+# Valor mensal máximo (na moeda da sua conta OCI, geralmente BRL ou USD)
 budget_amount      = 7
-budget_alert_email = "example@mail.com"
+budget_alert_email = "seu.email@exemplo.com"
+
+# ==============================================================================
+# 5. GitOps & Automação (GitHub)
+# ==============================================================================
+# Branch que o Ansible irá puxar (git pull) no boot das máquinas
+git_branch = "main"
+
+# Chave PRIVADA (Deploy Key) para acesso Read-Only ao repositório
+# Gere com: ssh-keygen -t ed25519 -C "deploy_key" -f deploy_key -N ""
+# DICA: Mantenha a formatação exata, incluindo os hifens de início e fim.
+github_deploy_key = <<EOT
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAAC... (Cole o conteúdo exato da sua Chave Privada aqui) ...
+... Certifique-se de que não há espaços em branco extras no final ...
+-----END OPENSSH PRIVATE KEY-----
+EOT

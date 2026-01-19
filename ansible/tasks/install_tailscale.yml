@@ -1,7 +1,7 @@
 ---
 - name: Debug - Starting Tailscale installation
   debug:
-    msg: "Installing Tailscale for {{ bootstrap_hostname }}"
+    msg: "Installing Tailscale for {{ ansible_hostname }}"
 
 - name: Instalar Tailscale (Via Script Oficial)
   shell: curl -fsSL https://tailscale.com/install.sh | sh
@@ -14,42 +14,39 @@
     enabled: yes
     state: started
 
-- name: Check Tailscale status
-  command: tailscale status
-  register: tailscale_status
+# ----------------------------------------------------------------------
+# Verificação de Estado (Idempotência)
+# ----------------------------------------------------------------------
+- name: Verificar estado atual do Tailscale
+  command: tailscale status --json
+  register: ts_status_check
   failed_when: false
   changed_when: false
 
-- name: Autenticar Tailscale
-  shell: |
-    if [ -f /root/.ts_auth_key ]; then
-      export TS_AUTHKEY=$(cat /root/.ts_auth_key)
-    fi
-    
-    # Se ja estiver logado, evita reautenticacao forcada se a chave nao existir
-    if tailscale status > /dev/null 2>&1 && [ -z "$TS_AUTHKEY" ]; then
-      echo "Tailscale already authenticated and no key provided. Skipping auth."
-      exit 0
-    fi
+- name: Definir fato: Tailscale está online?
+  set_fact:
+    is_tailscale_connected: "{{ (ts_status_check.stdout | from_json).BackendState == 'Running' }}"
+  when: ts_status_check.rc == 0
 
-    tailscale up \
-      --authkey="${TS_AUTHKEY:-}" \
-      --hostname={{ bootstrap_hostname }} \
-      {{ tailscale_args | default('') }}
-  environment:
-    TS_AUTHKEY: "{{ tailscale_auth_key | default('') }}"
+# ----------------------------------------------------------------------
+# Autenticação (Roda apenas se necessário)
+# ----------------------------------------------------------------------
+- name: Autenticar e Conectar ao Tailscale
+  command: >
+    tailscale up
+    --authkey={{ tailscale_auth_key }}
+    --hostname={{ ansible_hostname }}
+    --ssh
+    {{ tailscale_args | default('') }}
   register: ts_up
-  no_log: true
-  changed_when: "'Success' in ts_up.stdout"
-  failed_when: 
-    - ts_up.rc != 0
-    - "'already' not in ts_up.stderr"
+  no_log: true # Protege a chave de aparecer nos logs
+  when: 
+    - not is_tailscale_connected | default(false)
+    - tailscale_auth_key is defined and tailscale_auth_key | length > 0
 
-- name: Debug - Tailscale authentication completed
+  # Se a chave tiver tags, --advertise-tags NÃO deve ser passado em 'tailscale_args'.
+  # Se 'tailscale_args' for passado, ele será anexado ao final.
+
+- name: Debug - Tailscale status
   debug:
-    msg: "Tailscale connected with hostname {{ bootstrap_hostname }}"
-
-- name: Clean up Tailscale auth key file
-  file:
-    path: /root/.ts_auth_key
-    state: absent
+    msg: "Tailscale is connected as {{ ansible_hostname }} with SSH enabled."

@@ -29,10 +29,10 @@ locals {
 
     prod = {
       # Produçao: Usa 100% do Free Tier
-      arm_server_ocpus = 2
-      arm_server_ram   = 10
-      arm_worker_ram   = 7
-      arm_worker_count = 2
+      arm_server_ocpus     = 2
+      arm_server_ram       = 10
+      arm_worker_ram       = 7
+      arm_worker_count     = 2
       amd_worker_disk_size = 50
     }
   }
