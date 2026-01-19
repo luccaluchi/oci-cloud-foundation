@@ -9,7 +9,7 @@
       - name: Carregar variáveis de semente do Cloud-Init
         include_vars:
           file: /etc/ansible/host_vars/localhost.yml
-      ignore_errors: true
+        ignore_errors: true
       
   tasks:
     - name: Debug - Playbook start
