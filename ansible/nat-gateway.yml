@@ -121,7 +121,8 @@
     # ========================================================================
     - name: Limpar firewall e configurar UFW como única fonte de verdade
       include_tasks: tasks/cleanup_firewall.yml
-      6. Firewall Rules
+    # ========================================================================
+    # 6. Firewall Rules
     # ========================================================================
 
     - name: Configurar regras NAT no UFW before.rules
@@ -138,7 +139,11 @@
           -A POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
           
           COMMIT
-  port: 22
+          
+    - name: Liberar SSH (VPN e Subnet Privada)
+      community.general.ufw:
+        rule: allow
+        port: 22
         proto: tcp
         src: "{{ item }}"
         comment: "SSH {{ item }}"
