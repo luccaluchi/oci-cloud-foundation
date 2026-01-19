@@ -62,7 +62,7 @@ runcmd:
     sysctl -w net.ipv6.conf.lo.disable_ipv6=1
     
     echo "Waiting for Internet connectivity..."
-    until curl -4 -s --connect-timeout 5 https://google.com > /dev/null; do
+    until curl -v -4 --connect-timeout 5 https://google.com > /dev/null; do
       echo "Waiting for internet..."
       sleep 5
     done
