@@ -23,7 +23,7 @@
   failed_when: false
   changed_when: false
 
-- name: Definir fato: Tailscale está online?
+- name: "Definir fato: Tailscale está online?"
   set_fact:
     is_tailscale_connected: "{{ (ts_status_check.stdout | from_json).BackendState == 'Running' }}"
   when: ts_status_check.rc == 0
