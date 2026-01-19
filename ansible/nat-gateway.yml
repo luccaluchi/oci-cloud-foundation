@@ -6,7 +6,7 @@
   gather_facts: true
 
   vars:
-    # Valor de fallback. O valor real é injetado pelo Cloud-init em /etc/ansible/host_vars/localhost.yml
+    # Valor de fallback. O valor real é injetado pelo Cloud-init
     private_subnet: "10.0.0.0/24"
 
   tasks:
@@ -15,15 +15,13 @@
         msg: "Starting NAT Gateway configuration on {{ ansible_hostname }}"
 
     # ========================================================================
-    # 1. Firewall Cleanup (Prioridade Máxima)
+    # 1. Firewall Cleanup
     # ========================================================================
-    - name: Limpar firewall e configurar UFW como única fonte de verdade
+    - name: Limpar firewall
       include_tasks: tasks/cleanup_firewall.yml
-      vars:
-        ufw_forward_policy: ACCEPT  # Necessário para NAT/routing
 
     # ========================================================================
-    # 2. Interface Detection & Facts
+    # 2. Interface Detection
     # ========================================================================
     - name: Detect active public interface
       shell: ip route get 8.8.8.8 | grep -oP 'dev \K\S+' | head -n1
@@ -40,12 +38,8 @@
         that: public_interface is defined and public_interface | length > 0
         fail_msg: "ERROR: Could not detect public interface for NAT."
 
-    - name: Debug - Network Interface
-      debug:
-        msg: "Using public interface: {{ public_interface }} for NAT"
-
     # ========================================================================
-    # 3. Kernel & Sysctl (Modern)
+    # 3. Kernel & Sysctl
     # ========================================================================
     - name: Carregar módulos de kernel
       community.general.modprobe:
@@ -53,18 +47,18 @@
         state: present
       loop:
         - nf_nat
+        - iptable_nat
 
-    - name: Persistir módulos no boot (/etc/modules-load.d/nat.conf)
+    - name: Persistir módulos no boot
       copy:
         dest: /etc/modules-load.d/nat.conf
         content: |
           nf_nat
+          iptable_nat
         owner: root
         mode: '0644'
 
     - name: Configurar Sysctl para NAT e UFW
-      # Utilizamos o módulo sysctl focando no arquivo do UFW para evitar conflitos
-      # e garantir que o UFW carregue estas configs ao iniciar
       ansible.posix.sysctl:
         name: "{{ item.name }}"
         value: "{{ item.value }}"
@@ -75,22 +69,16 @@
         - { name: 'net.ipv4.ip_forward', value: '1' }
         - { name: 'net.ipv4.conf.all.forwarding', value: '1' }
         - { name: 'net.ipv6.conf.all.forwarding', value: '0' }
-        - { name: 'net.ipv6.conf.all.disable_ipv6', value: '1' }
-        - { name: 'net.ipv6.conf.default.disable_ipv6', value: '1' }
-        - { name: 'net.ipv6.conf.lo.disable_ipv6', value: '1' }
 
     # ========================================================================
-    # 3. Tailscale
+    # 4. Tailscale & Logs
     # ========================================================================
     - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
         tailscale_args: "--ssh --advertise-tags=tag:nat-gateway"
 
-    # ========================================================================
-    # 4. Logs (Rsyslog)
-    # ========================================================================
-    - name: Configurar recepção de logs (TCP/UDP 514)
+    - name: Configurar recepção de logs (Rsyslog)
       lineinfile:
         path: /etc/rsyslog.conf
         regexp: "{{ item.regexp }}"
@@ -119,13 +107,17 @@
         state: present
 
     # ========================================================================
-    # 5. Firewall: Limpar Tudo e Recriar (Abordagem Simples)
+    # 5. Firewall Rules (A Correção Real)
     # ========================================================================
-    - name: Limpar firewall e configurar UFW como única fonte de verdade
-      include_tasks: tasks/cleanup_firewall.yml
-    # ========================================================================
-    # 6. Firewall Rules
-    # ========================================================================
+
+    # --- CORREÇÃO 1: Forçar a política padrão no arquivo de config ---
+    # Isso simula o comando manual "iptables -P FORWARD ACCEPT"
+    - name: Garantir política DEFAULT_FORWARD_POLICY="ACCEPT"
+      lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+      notify: Reload UFW
 
     - name: Configurar regras NAT e Mangle no UFW before.rules
       blockinfile:
@@ -136,73 +128,46 @@
           # NAT table rules
           *nat
           :POSTROUTING ACCEPT [0:0]
-          
-          # Forward traffic from private subnet through public interface
           -A POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
-          
           COMMIT
 
-          # Mangle table rules (MSS Clamping for stability)
+          # Mangle table rules
           *mangle
           :POSTROUTING ACCEPT [0:0]
-
-          # Clamp MSS to PMTU to avoid fragmentation issues and instability
           -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o {{ public_interface }} -j TCPMSS --clamp-mss-to-pmtu
-          
           COMMIT
 
-    - name: Liberar SSH (VPN e Subnet Privada)
+    # Regras de INPUT (Para acessar a máquina)
+    - name: Liberar SSH e Logs (INPUT)
       community.general.ufw:
         rule: allow
-        port: 22
-        proto: tcp
-        src: "{{ item }}"
-        comment: "SSH {{ item }}"
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        src: "{{ item.src }}"
+        comment: "{{ item.comment }}"
       loop:
-        - '100.64.0.0/10'
-        - '{{ private_subnet }}'
+        - { port: '22', proto: 'tcp', src: '100.64.0.0/10', comment: 'SSH Tailscale' }
+        - { port: '22', proto: 'tcp', src: '{{ private_subnet }}', comment: 'SSH Private Subnet' }
+        - { port: '514', proto: 'udp', src: '{{ private_subnet }}', comment: 'Syslog UDP' }
+        - { port: '514', proto: 'tcp', src: '{{ private_subnet }}', comment: 'Syslog TCP' }
+        - { port: '41641', proto: 'udp', src: 'any', comment: 'Tailscale Direct UDP' }
 
-    - name: Liberar Tailscale UDP
+    # --- CORREÇÃO 2: Regra explícita de Roteamento (FORWARD) ---
+    # Garante que o UFW saiba que essa rede pode atravessar a máquina
+    - name: Liberar ROTEAMENTO da rede privada (FORWARD)
       community.general.ufw:
         rule: allow
-        port: 41641
-        proto: udp
-        comment: "Tailscale Direct UDP"
-
-    - name: Liberar rede Tailscale
-      community.general.ufw:
-        rule: allow
-        src: '100.64.0.0/10'
-        comment: "Allow Tailscale Network"
-
-    - name: Liberar rede privada
-      community.general.ufw:
-        rule: allow
+        route: yes              # <--- O PULO DO GATO
         src: "{{ private_subnet }}"
-        comment: "Allow Private Subnet"
-
-    - name: Liberar Rsyslog da rede privada
-      community.general.ufw:
-        rule: allow
-        port: 514
-        proto: "{{ item }}"
-        src: "{{ private_subnet }}"
-        comment: "Rsyslog"
-      loop:
-        - tcp
-        - udp
+        dest: "0.0.0.0/0"
+        comment: "Allow Forwarding/Routing for Private Subnet"
 
     - name: Habilitar UFW
       community.general.ufw:
         state: enabled
 
-    - name: Garantir que UFW inicia no boot
-      systemd:
-        name: ufw
-        enabled: yes
-
     # ========================================================================
-    # 6. Verification & Cleanup
+    # 6. Verification
     # ========================================================================
     - name: Verificar IP Forwarding
       command: sysctl net.ipv4.ip_forward
@@ -217,27 +182,9 @@
       failed_when: iptables_nat_check.rc != 0
       ignore_errors: yes
 
-    - name: Verificar status UFW
-      command: ufw status verbose
-      register: ufw_status_check
-      changed_when: false
-
-    - name: Exibir configuração final do firewall
+    - name: Exibir status final
       debug:
-        msg:
-          - "========================================="
-          - "NAT Gateway Firewall Configuration"
-          - "========================================="
-          - "IP Forwarding: {{ 'ENABLED' if '= 1' in sysctl_check.stdout else 'DISABLED' }}"
-          - "NAT Rule: {{ 'CONFIGURED' if iptables_nat_check.rc == 0 else 'MISSING' }}"
-          - "UFW Status: {{ 'ACTIVE' if 'Status: active' in ufw_status_check.stdout else 'INACTIVE' }}"
-          - "Public Interface: {{ public_interface }}"
-          - "Private Subnet: {{ private_subnet }}"
-          - "========================================="
-
-    - name: Salvar configuração de iptables via UFW
-      command: ufw reload
-      changed_when: false
+        msg: "NAT Gateway Configured. Forward Policy forced to ACCEPT."
 
   handlers:
     - name: Restart Rsyslog
