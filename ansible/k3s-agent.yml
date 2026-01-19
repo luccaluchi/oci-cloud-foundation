@@ -11,13 +11,21 @@
         msg: "Starting K3s Agent configuration on {{ ansible_hostname }}"
 
     # ========================================================================
-    # 1. Firewall Cleanup (Prioridade Máxima)
+    # 1. Preparação do Sistema (Firewall e Pacotes)
     # ========================================================================
     - name: Limpar firewall e configurar UFW como única fonte de verdade
       include_tasks: tasks/cleanup_firewall.yml
       vars:
-        ufw_forward_policy: ACCEPT  # Necessário para CNI (Flannel)
-        ufw_ipv6_enabled: no        # IPv6 desabilitado para evitar timeouts
+        ufw_forward_policy: ACCEPT
+        ufw_ipv6_enabled: no
+
+    - name: Instalar dependências do WireGuard
+      apt:
+        name:
+          - wireguard
+          - wireguard-tools
+        state: present
+        update_cache: yes
 
     # ========================================================================
     # 2. Configuração de Kernel e Sistema
@@ -30,10 +38,6 @@
         - br_netfilter
         - overlay
         - wireguard
-
-    - name: Debug - Kernel modules loaded
-      debug:
-        msg: "Kernel modules loaded successfully"
 
     - name: Persistir módulos no boot
       copy:
@@ -57,19 +61,14 @@
         - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
-        # Disable IPv6
         - { name: 'net.ipv6.conf.all.disable_ipv6', value: '1' }
         - { name: 'net.ipv6.conf.default.disable_ipv6', value: '1' }
         - { name: 'net.ipv6.conf.lo.disable_ipv6', value: '1' }
 
-    - name: Debug - Sysctls configured
-      debug:
-        msg: "Kubernetes sysctls configured successfully"
-
     # ========================================================================
-    # 2. Configuração de Rede e Logs
+    # 3. Configuração de Rede e Logs
     # ========================================================================
-    - name: Configurar Tailscale (task include)
+    - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
         tailscale_args: "--ssh --advertise-tags=tag:k3s-agent"
@@ -77,23 +76,15 @@
     - name: Garantir configuração do Rsyslog Client
       include_tasks: tasks/setup_rsyslog_client.yml
 
-    - name: Debug - Rsyslog configured
-      debug:
-        msg: "Rsyslog client configured successfully"
-
     - name: Obter IP Privado (OCI VCN)
       set_fact:
         private_ip: "{{ ansible_default_ipv4.address }}"
 
-    - name: Debug - Private IP obtained
-      debug:
-        msg: "Private IP: {{ private_ip }}"
-
     # ========================================================================
-    # 3. Firewall Rules (UFW)
+    # 4. Firewall Rules (UFW)
     # ========================================================================
     
-    - name: Liberar portas essenciais do K3s Agent (apenas VCN)
+    - name: Liberar portas essenciais do K3s Agent
       community.general.ufw:
         rule: allow
         port: "{{ item.port }}"
@@ -101,9 +92,7 @@
         src: '10.0.0.0/16'
         comment: "{{ item.comment }}"
       loop:
-        # Kubelet
         - { port: 10250, proto: 'tcp', comment: 'Kubelet (VCN)' }
-        # Flannel CNI
         - { port: 8472, proto: 'udp', comment: 'Flannel VXLAN' }
         - { port: 51820, proto: 'udp', comment: 'Flannel WireGuard' }
         - { port: 51821, proto: 'udp', comment: 'Flannel WireGuard IPv6' }
@@ -133,7 +122,7 @@
       community.general.ufw:
         rule: allow
         src: '10.42.0.0/16'
-        comment: 'Pod CIDR (Cluster DNS/Probes)'
+        comment: 'Pod CIDR'
 
     - name: SSH apenas de Tailscale e subnet privada
       community.general.ufw:
@@ -150,30 +139,22 @@
       community.general.ufw:
         state: enabled
 
-    - name: Garantir UFW no boot
+    - name: Garantir UFW no boot (Camada extra de segurança)
       systemd:
         name: ufw
         enabled: yes
 
-    - name: Debug - UFW configured
-      debug:
-        msg: "UFW configured and enabled successfully"
-
     # ========================================================================
-    # 4. Instalação do K3s Agent
+    # 5. Instalação do K3s Agent
     # ========================================================================
     
-    - name: Aguardar K3s Server estar acessível (Porta 6443)
+    - name: Aguardar K3s Server estar acessível
       wait_for:
         host: "{{ k3s_server_ip }}"
         port: 6443
         delay: 5
         timeout: 600
         state: started
-
-    - name: Debug - K3s Server is reachable
-      debug:
-        msg: "K3s Server {{ k3s_server_ip }}:6443 is accessible"
 
     - name: Criar diretório de configuração
       file:
@@ -202,10 +183,6 @@
       args:
         creates: /usr/local/bin/k3s-agent
 
-    - name: Debug - K3s Agent installed
-      debug:
-        msg: "K3s Agent installation completed"
-
     - name: Verificar se serviço está rodando
       systemd:
         name: k3s-agent
@@ -216,9 +193,6 @@
       debug:
         msg: "K3s Agent configuration completed successfully on {{ ansible_hostname }}"
 
-  # ========================================================================
-  # HANDLERS
-  # ========================================================================
   handlers:
     - name: Restart Rsyslog
       service:

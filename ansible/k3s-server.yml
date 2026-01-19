@@ -1,45 +1,48 @@
 ---
-- name: Configurar K3s Server (Control Plane)
+- name: Configurar K3s Server (Control Plane) - WireGuard Edition
   hosts: localhost
   connection: local
   become: true
   gather_facts: true
 
   vars:
-    # ajuste conforme seu VCN real
     vcn_cidr: "10.0.0.0/16"
 
   tasks:
     - name: Debug - Playbook start
       debug:
-        msg: "Starting K3s Server configuration on {{ ansible_hostname }}"
+        msg: "Starting K3s Server (WireGuard) configuration on {{ ansible_hostname }}"
 
     # ========================================================================
-    # 1. Firewall Cleanup (Prioridade Máxima)
+    # 1. Preparação do Sistema (Firewall e Pacotes)
     # ========================================================================
-    - name: Limpar firewall e configurar UFW como única fonte de verdade
+    - name: Limpar firewall e configurar UFW
       include_tasks: tasks/cleanup_firewall.yml
       vars:
-        ufw_forward_policy: ACCEPT  # Necessário para CNI (Flannel)
-        ufw_ipv6_enabled: no        # IPv6 desabilitado para evitar timeouts
+        ufw_forward_policy: ACCEPT
+        ufw_ipv6_enabled: no
+
+    - name: Instalar dependências do WireGuard
+      apt:
+        name:
+          - wireguard
+          - wireguard-tools
+        state: present
+        update_cache: yes
 
     # ========================================================================
     # 2. Kernel & System
     # ========================================================================
-    - name: Carregar módulos de kernel (Runtime)
+    - name: Carregar módulos de kernel (Essencial para WireGuard Native)
       community.general.modprobe:
         name: "{{ item }}"
         state: present
       loop:
         - br_netfilter
         - overlay
-        - wireguard
+        - wireguard  # Obrigatório estar carregado
 
-    - name: Debug - Kernel modules loaded
-      debug:
-        msg: "Kernel modules loaded successfully"
-
-    - name: Persistir módulos no boot (/etc/modules-load.d/k3s.conf)
+    - name: Persistir módulos no boot
       copy:
         dest: /etc/modules-load.d/k3s.conf
         content: |
@@ -61,29 +64,20 @@
         - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
-        # Disable IPv6
         - { name: 'net.ipv6.conf.all.disable_ipv6', value: '1' }
-        - { name: 'net.ipv6.conf.default.disable_ipv6', value: '1' }
-        - { name: 'net.ipv6.conf.lo.disable_ipv6', value: '1' }
 
-    - name: Debug - Sysctls configured
-      debug:
-        msg: "Kubernetes sysctls configured successfully"
-
-    # 2. Rede e logs
-    - name: Configurar Tailscale (task include)
+    # ========================================================================
+    # 3. Rede e Logs
+    # ========================================================================
+    - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
         tailscale_args: "--ssh --advertise-tags=tag:k3s-server"
 
-    - name: Debug - Tailscale configured
-      debug:
-        msg: "Tailscale configured successfully"
-
     - name: Garantir configuração do Rsyslog Client
       include_tasks: tasks/setup_rsyslog_client.yml
 
-    - name: Obter IP do Tailscale (para TLS SAN) - tolerante
+    - name: Obter IP do Tailscale
       command: tailscale ip -4
       register: ts_ip
       failed_when: false
@@ -93,15 +87,10 @@
       set_fact:
         private_ip: "{{ ansible_default_ipv4.address }}"
 
-    - name: Debug - Network IPs obtained
-      debug:
-        msg: "Private IP: {{ private_ip }}, Tailscale IP: {{ ts_ip.stdout | default('not available') }}"
-
     # ========================================================================
-    # 3. Firewall Rules
+    # 4. Firewall Rules (Portas do WireGuard)
     # ========================================================================
-
-    - name: Liberar portas essenciais do K3s Server
+    - name: Liberar portas essenciais do K3s e WireGuard
       community.general.ufw:
         rule: allow
         port: "{{ item.port }}"
@@ -109,65 +98,36 @@
         src: "{{ item.src | default('any') }}"
         comment: "{{ item.comment }}"
       loop:
-        # API Server - apenas VCN e Tailscale
         - { port: 6443, proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'K3s API (VCN)' }
         - { port: 6443, proto: 'tcp', src: '100.64.0.0/10', comment: 'K3s API (Tailscale)' }
-        # Kubelet - apenas VCN
-        - { port: 10250, proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'Kubelet (VCN)' }
-        # ETCD - apenas VCN
-        - { port: '2379:2380', proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'ETCD (VCN)' }
-        # Flannel CNI
-        - { port: 8472, proto: 'udp', src: '{{ vcn_cidr }}', comment: 'Flannel VXLAN' }
+        - { port: 10250, proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'Kubelet' }
+        - { port: '2379:2380', proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'ETCD' }
+        # Portas WireGuard (Essenciais para flannel-backend: wireguard-native)
         - { port: 51820, proto: 'udp', src: '{{ vcn_cidr }}', comment: 'Flannel WireGuard' }
         - { port: 51821, proto: 'udp', src: '{{ vcn_cidr }}', comment: 'Flannel WireGuard IPv6' }
-        # Tailscale
         - { port: 41641, proto: 'udp', src: 'any', comment: 'Tailscale UDP' }
 
-    - name: Liberar NodePorts da VCN
+    - name: Liberar NodePorts, Pods e SSH
       community.general.ufw:
         rule: allow
-        port: 30000:32767
-        proto: tcp
-        src: '{{ vcn_cidr }}'
-        comment: 'NodePorts (VCN)'
-
-    - name: Liberar toda rede Tailscale
-      community.general.ufw:
-        rule: allow
-        src: '100.64.0.0/10'
-        comment: 'Tailscale VPN'
-
-    - name: Liberar Pod CIDR (10.42.0.0/16)
-      community.general.ufw:
-        rule: allow
-        src: '10.42.0.0/16'
-        comment: 'Pod CIDR (Cluster DNS/Probes)'
-
-    - name: SSH apenas de Tailscale e subnet privada
-      community.general.ufw:
-        rule: allow
-        port: 22
-        proto: tcp
-        src: "{{ item }}"
-        comment: "SSH {{ item }}"
+        port: "{{ item.port | default(omit) }}"
+        proto: "{{ item.proto | default('any') }}"
+        src: "{{ item.src }}"
+        comment: "{{ item.comment }}"
       loop:
-        - '100.64.0.0/10'
-        - '{{ vcn_cidr }}'
+        - { port: '30000:32767', proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'NodePorts' }
+        - { src: '100.64.0.0/10', comment: 'Tailscale VPN' }
+        - { src: '10.42.0.0/16', comment: 'Pod CIDR' }
+        - { port: 22, proto: 'tcp', src: '100.64.0.0/10', comment: 'SSH Tailscale' }
+        - { port: 22, proto: 'tcp', src: '{{ vcn_cidr }}', comment: 'SSH VCN' }
 
     - name: Habilitar UFW
       community.general.ufw:
         state: enabled
 
-    - name: Garantir UFW no boot
-      systemd:
-        name: ufw
-        enabled: yes
-
-    - name: Debug - UFW configured
-      debug:
-        msg: "UFW configured and enabled successfully"
-
-    # 4. Configuração persistente K3s
+    # ========================================================================
+    # 5. Configuração e Instalação K3s (WireGuard Native)
+    # ========================================================================
     - name: Criar diretório /etc/rancher/k3s
       file:
         path: /etc/rancher/k3s
@@ -181,6 +141,7 @@
         content: |
           node-ip: "{{ private_ip }}"
           token: "{{ k3s_token }}"
+          write-kubeconfig-mode: "0644"
 
           tls-san:
             - "{{ ansible_hostname }}"
@@ -195,13 +156,12 @@
           node-label:
             - topology.kubernetes.io/region=oci-br
             - node.kubernetes.io/instance-type=ampere
-            - node-role.kubernetes.io/worker=worker
+            - tipo=infra
         owner: root
         mode: '0644'
       notify: Restart K3s
 
-    # 5. Install k3s
-    - name: Instalar K3s Server (idempotente)
+    - name: Instalar K3s Server
       shell: curl -sfL https://get.k3s.io | sh -s - server
       environment:
         K3S_TOKEN: "{{ k3s_token }}"
@@ -210,11 +170,30 @@
       register: install_k3s
       failed_when: install_k3s.rc != 0 and install_k3s.rc != 1
 
-    - name: Debug - K3s Server installation completed
-      debug:
-        msg: "K3s Server installation completed, waiting for ready status"
+    # ========================================================================
+    # 6. Pós-Instalação e Ajustes Finos
+    # ========================================================================
+    - name: Configurar acesso para usuario ubuntu
+      block:
+        - name: Criar pasta .kube
+          file:
+            path: /home/ubuntu/.kube
+            state: directory
+            owner: ubuntu
+            group: ubuntu
+            mode: '0755'
+        
+        - name: Copiar kubeconfig
+          copy:
+            src: /etc/rancher/k3s/k3s.yaml
+            dest: /home/ubuntu/.kube/config
+            remote_src: yes
+            owner: ubuntu
+            group: ubuntu
+            mode: '0600'
+          ignore_errors: true
 
-    - name: Aguardar K3s Ready (verificando node por hostname)
+    - name: Aguardar K3s ficar Ready
       command: kubectl get node "{{ ansible_hostname }}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
       register: k3s_ready
       until: k3s_ready.stdout == "True"
@@ -222,20 +201,6 @@
       delay: 10
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      changed_when: false
-
-    # 6. Remover taints para permitir workloads no control-plane (opcional)
-    - name: Remover taints do Master (Permitir Workloads)
-      shell: |
-        kubectl taint nodes "{{ ansible_hostname }}" node-role.kubernetes.io/control-plane- || true
-        kubectl taint nodes "{{ ansible_hostname }}" node-role.kubernetes.io/master- || true
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      changed_when: false
-
-    - name: Debug - Playbook completed
-      debug:
-        msg: "K3s Server configuration completed successfully on {{ ansible_hostname }}"
 
   handlers:
     - name: Restart Rsyslog
