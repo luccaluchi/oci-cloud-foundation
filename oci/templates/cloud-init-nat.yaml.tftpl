@@ -43,40 +43,47 @@ write_files:
         StrictHostKeyChecking accept-new
 
 runcmd:
-  - logger -t cloud-init "NAT Gateway bootstrap started on ${hostname}"
-  - logger -t cloud-init "Configuring SSH keys"
-  - mkdir -p /root/.ssh
-  - chmod 700 /root/.ssh
-  
-  - ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
-  - logger -t cloud-init "SSH keys configured"
+  # 1. Ajustes Iniciais e Conectividade
+  - |
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1
+    until curl -sf4 --max-time 5 http://connectivitycheck.gstatic.com/generate_204 > /dev/null; do
+      sleep 5
+    done
 
-  - logger -t cloud-init "Installing Tailscale"
+  # 2. ESPERA PELO APT LOCK (Prevenção de Erro)
+  - |
+    echo "Aguardando lock do APT..."
+    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+      sleep 5
+    done
+
+  # 3. Instalação de Ferramentas Base
+  - apt-get update
+  - apt-get install -y software-properties-common
+  - add-apt-repository --yes ppa:ansible/ansible
+  - apt-get update
+  - apt-get install -y curl git ansible rsyslog ufw python3-pip
+
+  # 4. SSH e Tailscale
+  - mkdir -p /root/.ssh && chmod 700 /root/.ssh
+  - ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
   - curl -fsSL https://tailscale.com/install.sh | sh
   - systemctl enable --now tailscaled
-  - logger -t cloud-init "Tailscale service started"
-  
-  - logger -t cloud-init "Authenticating Tailscale"
   - |
-    timeout 60s tailscale up \
-      --authkey="$(cat /root/.ts_auth_key)" \
-      --hostname='${hostname}' \
-      --ssh \
-      || logger -t cloud-init "Tailscale authentication failed or timed out"
-  - logger -t cloud-init "Tailscale configured successfully"
+    timeout 60s tailscale up --authkey="$(cat /root/.ts_auth_key)" --hostname='${hostname}' --ssh || true
 
-  - logger -t cloud-init "Installing Ansible collections"
+  # 5. EXECUÇÃO PROFISSIONAL DO ANSIBLE-PULL
   - ansible-galaxy collection install community.general ansible.posix
-  - logger -t cloud-init "Ansible collections installed"
+  - |
+    ansible-pull -U ${github_repo_url} \
+                 -C ${git_branch} \
+                 -d /opt/infra-setup \
+                 -i localhost, \
+                 -e "@/etc/ansible/host_vars/localhost.yml" \
+                 ansible/nat-gateway.yml 2>&1 | tee /var/log/ansible-pull.log
 
-  - logger -t cloud-init "Starting ansible-pull for nat-gateway"
-  - ansible-pull -U ${github_repo_url} -C ${git_branch} -d /opt/infra-setup -e @/etc/ansible/host_vars/localhost.yml ansible/nat-gateway.yml 2>&1 | tee /var/log/ansible-pull.log
-  - logger -t cloud-init "ansible-pull completed"
-  - logger -t cloud-init "ansible-pull completed"
-
-  - logger -t cloud-init "Starting cleanup of sensitive credentials"
-  - sleep 5
+  # 6. Limpeza de Segurança
+  - sleep 10
   - shred -u /root/.ssh/github_deploy_key || true
   - shred -u /root/.ts_auth_key || true
   - sed -i '/tailscale_auth_key:/d' /etc/ansible/host_vars/localhost.yml || true
-  - logger -t cloud-init "Cleanup completed - bootstrap finished"

@@ -5,11 +5,20 @@
   become: true
   gather_facts: true
 
-  vars:
-    # Valor padrão caso o Cloud-Init falhe (mas será sobrescrito pelo host_vars)
-    private_subnet: "10.0.0.0/24"
+  pre_tasks:
+    - name: Carregar variáveis de semente do Cloud-Init
+      include_vars:
+        file: /etc/ansible/host_vars/localhost.yml
+      ignore_errors: true
 
   tasks:
+    - name: Validar se a subnet privada foi definida
+      assert:
+        that: 
+          - private_subnet is defined
+          - private_subnet | length > 0
+        fail_msg: "ERRO: private_subnet não encontrada no host_vars ou extra-vars!"
+
     # ========================================================================
     # 1. Preparação e Limpeza
     # ========================================================================

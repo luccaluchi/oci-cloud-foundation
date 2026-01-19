@@ -105,10 +105,17 @@ runcmd:
                  -C ${git_branch} \
                  -d /opt/infra-setup \
                  -i localhost, \
+                 -e "@/etc/ansible/host_vars/localhost.yml" \
                  ansible/k3s-server.yml 2>&1 | tee /var/log/ansible-pull.log
     
-  # 8. Limpeza de Segurança
+  # 8. Limpeza de Segurança (Versão Corrigida)
   - sleep 10
+  # Destrói os arquivos de chave física
   - shred -u /root/.ssh/github_deploy_key || true
   - shred -u /root/.ts_auth_key || true
-  - logger -t cloud-init "Bootstrap finalizado com sucesso."
+  
+  # Remove as linhas sensíveis do arquivo de sementes (Seed)
+  - sed -i '/tailscale_auth_key:/d' /etc/ansible/host_vars/localhost.yml || true
+  - sed -i '/k3s_token:/d' /etc/ansible/host_vars/localhost.yml || true
+  
+  - logger -t cloud-init "Bootstrap finalizado com sucesso e segredos removidos do disco."

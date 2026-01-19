@@ -105,6 +105,7 @@ runcmd:
                  -C ${git_branch} \
                  -d /opt/infra-setup \
                  -i localhost, \
+                 -e "@/etc/ansible/host_vars/localhost.yml" \
                  ansible/k3s-agent.yml 2>&1 | tee /var/log/ansible-pull.log
 
   # 8. Limpeza de Credenciais Sensíveis

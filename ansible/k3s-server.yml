@@ -8,6 +8,12 @@
   vars:
     vcn_cidr: "10.0.0.0/16"
 
+  pre_tasks:
+      - name: Carregar sementes do Cloud-Init
+        include_vars:
+          file: /etc/ansible/host_vars/localhost.yml
+        ignore_errors: true
+
   tasks:
     - name: Debug - Playbook start
       debug:
