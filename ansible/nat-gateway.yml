@@ -127,7 +127,7 @@
     # 6. Firewall Rules
     # ========================================================================
 
-    - name: Configurar regras NAT no UFW before.rules
+    - name: Configurar regras NAT e Mangle no UFW before.rules
       blockinfile:
         path: /etc/ufw/before.rules
         insertbefore: '^\*filter'
@@ -139,6 +139,15 @@
           
           # Forward traffic from private subnet through public interface
           -A POSTROUTING -s {{ private_subnet }} -o {{ public_interface }} -j MASQUERADE
+          
+          COMMIT
+
+          # Mangle table rules (MSS Clamping for stability)
+          *mangle
+          :POSTROUTING ACCEPT [0:0]
+
+          # Clamp MSS to PMTU to avoid fragmentation issues and instability
+          -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o {{ public_interface }} -j TCPMSS --clamp-mss-to-pmtu
           
           COMMIT
 

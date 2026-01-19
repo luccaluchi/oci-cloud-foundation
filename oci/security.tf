@@ -57,6 +57,26 @@ resource "oci_core_security_list" "public" {
     }
   }
 
+  # Ingress: ICMP Type 3 (Destination Unreachable) para PMTUD
+  ingress_security_rules {
+    protocol    = "1" # ICMP
+    source      = "0.0.0.0/0"
+    description = "ICMP Destination Unreachable (PMTUD)"
+    icmp_options {
+      type = 3
+    }
+  }
+
+  # Ingress: ICMP Type 11 (Time Exceeded) para Traceroute
+  ingress_security_rules {
+    protocol    = "1" # ICMP
+    source      = "0.0.0.0/0"
+    description = "ICMP Time Exceeded (Traceroute)"
+    icmp_options {
+      type = 11
+    }
+  }
+
   # Ingress: Tráfego da subnet privada (respostas do NAT)
   ingress_security_rules {
     protocol    = "all"
