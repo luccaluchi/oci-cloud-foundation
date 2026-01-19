@@ -88,7 +88,6 @@ runcmd:
       --authkey="$(cat /root/.ts_auth_key)" \
       --hostname='${hostname}' \
       --ssh \
-      --advertise-tags=tag:k3s-server \
       || logger -t cloud-init "Tailscale authentication failed or timed out"
   - logger -t cloud-init "Tailscale configured successfully"
 

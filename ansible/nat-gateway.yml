@@ -70,7 +70,7 @@
     - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
-        tailscale_args: "--ssh --advertise-tags=tag:nat-gateway"
+        #tailscale_args: ""
 
     - name: Configurar Rsyslog (UDP/TCP 514)
       lineinfile:

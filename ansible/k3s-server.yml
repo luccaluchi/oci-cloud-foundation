@@ -72,7 +72,7 @@
     - name: Configurar Tailscale
       include_tasks: tasks/install_tailscale.yml
       vars:
-        tailscale_args: "--ssh --advertise-tags=tag:k3s-server"
+        #tailscale_args: ""
 
     - name: Garantir configuração do Rsyslog Client
       include_tasks: tasks/setup_rsyslog_client.yml
